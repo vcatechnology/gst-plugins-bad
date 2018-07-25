@@ -474,6 +474,7 @@ AG_GST_CHECK_PLUGIN(audiomixmatrix)
 AG_GST_CHECK_PLUGIN(compositor)
 AG_GST_CHECK_PLUGIN(audiovisualizers)
 AG_GST_CHECK_PLUGIN(autoconvert)
+AG_GST_CHECK_PLUGIN(autoconvert2)
 AG_GST_CHECK_PLUGIN(bayer)
 AG_GST_CHECK_PLUGIN(camerabin2)
 AG_GST_CHECK_PLUGIN(coloreffects)
@@ -3522,6 +3523,7 @@ gst/audiomixer/Makefile
 gst/audiomixmatrix/Makefile
 gst/audiovisualizers/Makefile
 gst/autoconvert/Makefile
+gst/autoconvert2/Makefile
 gst/bayer/Makefile
 gst/camerabin2/Makefile
 gst/coloreffects/Makefile

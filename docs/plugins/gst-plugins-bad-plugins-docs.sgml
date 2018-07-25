@@ -162,6 +162,7 @@
     <xi:include href="xml/plugin-audiomixer.xml" />
     <xi:include href="xml/plugin-audiovisualizers.xml" />
     <xi:include href="xml/plugin-autoconvert.xml" />
+    <xi:include href="xml/plugin-autoconvert2.xml" />
     <xi:include href="xml/plugin-assrender.xml" />
     <xi:include href="xml/plugin-bayer.xml" />
     <xi:include href="xml/plugin-bs2b.xml" />
