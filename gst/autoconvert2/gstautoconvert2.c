@@ -85,6 +85,13 @@ static GstPad *gst_auto_convert2_request_new_pad (GstElement * element,
     GstPadTemplate * templ, const gchar * name, const GstCaps * caps);
 static void gst_auto_convert2_release_pad (GstElement * element, GstPad * pad);
 
+static gboolean gst_auto_convert2_sink_event (GstPad * pad, GstObject * parent,
+    GstEvent * event);
+static gboolean gst_auto_convert2_sink_query (GstPad * pad, GstObject * parent,
+    GstQuery * query);
+static gboolean gst_auto_convert2_src_query (GstPad * pad, GstObject * parent,
+    GstQuery * query);
+
 static gboolean find_pad_templates (GstElementFactory * factory,
     GstStaticPadTemplate ** sink_pad_template,
     GstStaticPadTemplate ** src_pad_template);
@@ -167,6 +174,16 @@ gst_auto_convert2_request_new_pad (GstElement * element,
 
   GST_AUTO_CONVERT2_LOCK (autoconvert2);
 
+  if (GST_PAD_TEMPLATE_DIRECTION (templ) == GST_PAD_SINK) {
+    gst_pad_set_event_function (pad,
+        GST_DEBUG_FUNCPTR (gst_auto_convert2_sink_event));
+    gst_pad_set_query_function (pad,
+        GST_DEBUG_FUNCPTR (gst_auto_convert2_sink_query));
+  } else {
+    gst_pad_set_query_function (pad,
+        GST_DEBUG_FUNCPTR (gst_auto_convert2_src_query));
+  }
+
   if (gst_element_add_pad (element, pad)) {
     GST_AUTO_CONVERT2_UNLOCK (autoconvert2);
     return pad;
@@ -186,6 +203,26 @@ gst_auto_convert2_release_pad (GstElement * element, GstPad * pad)
   GST_AUTO_CONVERT2_LOCK (autoconvert2);
   gst_element_remove_pad (element, pad);
   GST_AUTO_CONVERT2_UNLOCK (autoconvert2);
+}
+
+static gboolean
+gst_auto_convert2_sink_event (GstPad * pad, GstObject * parent,
+    GstEvent * event)
+{
+  return gst_pad_event_default (pad, parent, event);
+}
+
+static gboolean
+gst_auto_convert2_sink_query (GstPad * pad, GstObject * parent,
+    GstQuery * query)
+{
+  return gst_pad_query_default (pad, parent, query);
+}
+
+static gboolean
+gst_auto_convert2_src_query (GstPad * pad, GstObject * parent, GstQuery * query)
+{
+  return gst_pad_query_default (pad, parent, query);
 }
 
 static gboolean
