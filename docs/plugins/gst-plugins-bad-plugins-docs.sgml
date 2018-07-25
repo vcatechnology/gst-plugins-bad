@@ -25,6 +25,7 @@
     <xi:include href="xml/element-audiomixer.xml" />
     <xi:include href="xml/element-audioparse.xml" />
     <xi:include href="xml/element-autoconvert.xml" />
+    <xi:include href="xml/element-autoconvert2.xml" />
     <xi:include href="xml/element-bs2b.xml" />
     <xi:include href="xml/element-bulge.xml" />
     <xi:include href="xml/element-burn.xml" />

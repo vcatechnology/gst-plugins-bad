@@ -1,4 +1,5 @@
 autocon_sources = [
+  'gstautoconvert2.c',
   'plugin.c',
 ]
 

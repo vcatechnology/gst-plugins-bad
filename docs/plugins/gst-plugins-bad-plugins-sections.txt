@@ -288,6 +288,22 @@ gst_auto_convert_get_type
 </SECTION>
 
 <SECTION>
+<FILE>element-autoconvert2</FILE>
+<TITLE>autoconvert2</TITLE>
+GstAutoConvert2
+<SUBSECTION Standard>
+GstAutoConvert2Class
+GST_AUTO_CONVERT2
+GST_AUTO_CONVERT2_CAST
+GST_IS_AUTO_CONVERT2
+GST_AUTO_CONVERT2_CLASS
+GST_IS_AUTO_CONVERT2_CLASS
+GST_TYPE_AUTO_CONVERT2
+<SUBSECTION Private>
+gst_auto_convert2_get_type
+</SECTION>
+
+<SECTION>
 <FILE>element-autovideoconvert</FILE>
 <TITLE>autovideoconvert</TITLE>
 GstAutoVideoConvert
