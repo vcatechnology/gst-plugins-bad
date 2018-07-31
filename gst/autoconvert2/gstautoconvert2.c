@@ -68,6 +68,14 @@ struct FactoryListEntry
   GstElementFactory *factory;
 };
 
+struct ChainGenerator
+{
+  GstCaps *sink_caps, *src_caps;
+  guint length;
+  GSList **iterators;
+  gboolean init;
+};
+
 struct _GstAutoConvert2Priv
 {
   /* Lock to prevent caps pipeline structure changes during changes to pads. */
@@ -89,6 +97,9 @@ static void gst_auto_convert2_dispose (GObject * object);
 
 static gboolean gst_auto_convert2_validate_transform_route (GstAutoConvert2 *
     autoconvert2, const GstAutoConvert2TransformRoute * route);
+static int gst_auto_convert2_validate_chain (GstAutoConvert2 * autoconvert2,
+    GstCaps * sink_caps, GstCaps * src_caps, GSList ** chain,
+    guint chain_length);
 
 static GstPad *gst_auto_convert2_request_new_pad (GstElement * element,
     GstPadTemplate * templ, const gchar * name, const GstCaps * caps);
@@ -112,6 +123,22 @@ static void index_factories (GstAutoConvert2 * autoconvert2);
 
 static gboolean query_caps (GstAutoConvert2 * autoconvert2, GstQuery * query,
     GstCaps * factory_caps, GList * pads);
+
+static int validate_chain_caps (GstAutoConvert2 * autoconvert2,
+    GstCaps * chain_sink_caps, GstCaps * chain_src_caps, GSList ** chain,
+    guint chain_length);
+static int validate_non_consecutive_elements (GstAutoConvert2 * autoconvert2,
+    GstCaps * sink_caps, GstCaps * src_caps, GSList ** chain,
+    guint chain_length);
+
+static void init_chain_generator (struct ChainGenerator *generator,
+    GSList * factory_index,
+    const GstAutoConvert2TransformRoute * transform_route, guint length);
+static void destroy_chain_generator (struct ChainGenerator *generator);
+static gboolean advance_chain_generator (struct ChainGenerator *generator,
+    GSList * factory_index, guint starting_depth);
+static gboolean generate_next_chain (GstAutoConvert2 * autoconvert2,
+    struct ChainGenerator *generator);
 
 static void build_graph (GstAutoConvert2 * autoconvert2);
 
@@ -137,6 +164,7 @@ gst_auto_convert2_class_init (GstAutoConvert2Class * klass)
 
   klass->validate_transform_route =
       GST_DEBUG_FUNCPTR (gst_auto_convert2_validate_transform_route);
+  klass->validate_chain = GST_DEBUG_FUNCPTR (gst_auto_convert2_validate_chain);
 
   gstelement_class->request_new_pad =
       GST_DEBUG_FUNCPTR (gst_auto_convert2_request_new_pad);
@@ -191,6 +219,30 @@ gst_auto_convert2_validate_transform_route (GstAutoConvert2 * autoconvert2,
     const GstAutoConvert2TransformRoute * route)
 {
   return TRUE;
+}
+
+static int
+gst_auto_convert2_validate_chain (GstAutoConvert2 * autoconvert2,
+    GstCaps * sink_caps, GstCaps * src_caps, GSList ** chain,
+    guint chain_length)
+{
+  typedef int (*Validator) (GstAutoConvert2 *, GstCaps *, GstCaps *, GSList **,
+      guint);
+  const Validator validators[] = {
+    validate_chain_caps,
+    validate_non_consecutive_elements
+  };
+
+  guint i;
+
+  for (i = 0; i != sizeof (validators) / sizeof (validators[0]); i++) {
+    const int depth = validators[i] (autoconvert2, sink_caps, src_caps, chain,
+        chain_length);
+    if (depth != -1)
+      return depth;
+  }
+
+  return -1;
 }
 
 static GstPad *
@@ -429,6 +481,120 @@ query_caps (GstAutoConvert2 * autoconvert2, GstQuery * query,
   gst_caps_unref (caps);
 
   return TRUE;
+}
+
+static void
+init_chain_generator (struct ChainGenerator *generator, GSList * factory_index,
+    const GstAutoConvert2TransformRoute * transform_route, guint length)
+{
+  guint i;
+
+  generator->sink_caps = transform_route->sink.caps;
+  gst_caps_ref (generator->sink_caps);
+  generator->src_caps = transform_route->src.caps;
+  gst_caps_ref (generator->src_caps);
+
+  generator->length = length;
+  generator->iterators = g_malloc (sizeof (GSList *) * length);
+  for (i = 0; i != length; i++)
+    generator->iterators[i] = factory_index;
+  generator->init = TRUE;
+}
+
+static void
+destroy_chain_generator (struct ChainGenerator *generator)
+{
+  gst_caps_unref (generator->sink_caps);
+  gst_caps_unref (generator->src_caps);
+  g_free (generator->iterators);
+}
+
+static int
+validate_chain_caps (GstAutoConvert2 * autoconvert2, GstCaps * chain_sink_caps,
+    GstCaps * chain_src_caps, GSList ** chain, guint chain_length)
+{
+  int depth = chain_length;
+
+  /* Check if this chain's caps can connect, heading in the upstream
+   * direction. */
+  do {
+    const GstCaps *const src_caps = (depth == 0) ? chain_sink_caps :
+        ((struct FactoryListEntry *) chain[depth - 1]->data)->src_caps;
+    const GstCaps *const sink_caps = (depth == chain_length) ? chain_src_caps :
+        ((struct FactoryListEntry *) chain[depth]->data)->sink_caps;
+
+    if (!gst_caps_can_intersect (src_caps, sink_caps))
+      break;
+  } while (--depth >= 0);
+
+  return depth;
+}
+
+static int
+validate_non_consecutive_elements (GstAutoConvert2 * autoconvert2,
+    GstCaps * sink_caps, GstCaps * src_caps, GSList ** chain,
+    guint chain_length)
+{
+  int depth = 0;
+  for (depth = chain_length - 2; depth >= 0; depth--)
+    if (chain[depth]->data == chain[depth + 1]->data)
+      break;
+  return depth;
+}
+
+static gboolean
+advance_chain_generator (struct ChainGenerator *generator,
+    GSList * factory_index, guint starting_depth)
+{
+  int i;
+  const guint len = generator->length;
+
+  /* Advance to the next permutation. */
+  for (i = starting_depth; i < len; i++) {
+    GSList **const it = generator->iterators + i;
+    *it = (*it)->next;
+    if (*it)
+      break;
+    else
+      *it = factory_index;
+  }
+
+  /* If all the permutations have been tried, the generator is done. */
+  if (i == len)
+    return FALSE;
+
+  /* Reset all the elements above the starting depth. */
+  for (i = 0; i != starting_depth; i++)
+    generator->iterators[i] = factory_index;
+
+  return TRUE;
+}
+
+static gboolean
+generate_next_chain (GstAutoConvert2 * autoconvert2, struct ChainGenerator *gen)
+{
+  const GstAutoConvert2Class *const klass =
+      GST_AUTO_CONVERT2_GET_CLASS (autoconvert2);
+  int depth = 0;
+
+  if (!autoconvert2->priv->factory_index)
+    return FALSE;
+
+  for (;;) {
+    if (gen->init)
+      gen->init = FALSE;
+    else if (!advance_chain_generator (gen, autoconvert2->priv->factory_index,
+            depth))
+      return FALSE;
+
+    depth = klass->validate_chain (autoconvert2, gen->sink_caps, gen->src_caps,
+        gen->iterators, gen->length);
+    if (depth < 0)
+      return TRUE;
+
+    if (depth > 0)
+      depth--;
+  }
 }
 
 static void

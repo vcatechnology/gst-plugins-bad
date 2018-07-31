@@ -61,6 +61,9 @@ struct _GstAutoConvert2Class
   GList* (*get_factories) (GstAutoConvert2 * autoconvert2);
   gboolean (*validate_transform_route) (GstAutoConvert2 * autoconvert2,
     const GstAutoConvert2TransformRoute * route);
+  int (*validate_chain) (GstAutoConvert2 * autoconvert2,
+    GstCaps *chain_sink_caps, GstCaps *chain_src_caps, GSList **chain,
+    guint chain_length);
 };
 
 GType gst_auto_convert2_get_type (void);
