@@ -61,17 +61,38 @@ static GstStaticPadTemplate srctemplate = GST_STATIC_PAD_TEMPLATE ("src_%u",
     GST_PAD_REQUEST,
     GST_STATIC_CAPS_ANY);
 
+struct FactoryListEntry
+{
+  GstStaticPadTemplate *sink_pad_template, *src_pad_template;
+  GstCaps *sink_caps, *src_caps;
+  GstElementFactory *factory;
+};
+
 struct _GstAutoConvert2Priv
 {
   /* Lock to prevent caps pipeline structure changes during changes to pads. */
   GMutex lock;
+
+  /* List of element factories with their pad templates and caps constructed. */
+  GSList *factory_index;
 };
 
+static void gst_auto_convert2_constructed (GObject * object);
 static void gst_auto_convert2_finalize (GObject * object);
+static void gst_auto_convert2_dispose (GObject * object);
 
 static GstPad *gst_auto_convert2_request_new_pad (GstElement * element,
     GstPadTemplate * templ, const gchar * name, const GstCaps * caps);
 static void gst_auto_convert2_release_pad (GstElement * element, GstPad * pad);
+
+static gboolean find_pad_templates (GstElementFactory * factory,
+    GstStaticPadTemplate ** sink_pad_template,
+    GstStaticPadTemplate ** src_pad_template);
+static struct FactoryListEntry *create_factory_index_entry (GstElementFactory *
+    factory, GstStaticPadTemplate * sink_pad_template,
+    GstStaticPadTemplate * src_pad_template);
+static void destroy_factory_list_entry (struct FactoryListEntry *entry);
+static void index_factories (GstAutoConvert2 * autoconvert2);
 
 #define gst_auto_convert2_parent_class parent_class
 G_DEFINE_TYPE (GstAutoConvert2, gst_auto_convert2, GST_TYPE_BIN);
@@ -98,7 +119,10 @@ gst_auto_convert2_class_init (GstAutoConvert2Class * klass)
   gstelement_class->release_pad =
       GST_DEBUG_FUNCPTR (gst_auto_convert2_release_pad);
 
+  gobject_class->constructed =
+      GST_DEBUG_FUNCPTR (gst_auto_convert2_constructed);
   gobject_class->finalize = GST_DEBUG_FUNCPTR (gst_auto_convert2_finalize);
+  gobject_class->dispose = GST_DEBUG_FUNCPTR (gst_auto_convert2_dispose);
 }
 
 static void
@@ -109,12 +133,29 @@ gst_auto_convert2_init (GstAutoConvert2 * autoconvert2)
 }
 
 static void
+gst_auto_convert2_constructed (GObject * object)
+{
+  GstAutoConvert2 *const autoconvert2 = GST_AUTO_CONVERT2 (object);
+  index_factories (autoconvert2);
+  G_OBJECT_CLASS (parent_class)->constructed (object);
+}
+
+static void
 gst_auto_convert2_finalize (GObject * object)
 {
   GstAutoConvert2 *const autoconvert2 = GST_AUTO_CONVERT2 (object);
 
   g_mutex_clear (&autoconvert2->priv->lock);
   g_free (autoconvert2->priv);
+}
+
+static void
+gst_auto_convert2_dispose (GObject * object)
+{
+  GstAutoConvert2 *const autoconvert2 = GST_AUTO_CONVERT2 (object);
+  g_slist_free_full (autoconvert2->priv->factory_index,
+      (GDestroyNotify) destroy_factory_list_entry);
+  G_OBJECT_CLASS (parent_class)->dispose (object);
 }
 
 static GstPad *
@@ -145,4 +186,86 @@ gst_auto_convert2_release_pad (GstElement * element, GstPad * pad)
   GST_AUTO_CONVERT2_LOCK (autoconvert2);
   gst_element_remove_pad (element, pad);
   GST_AUTO_CONVERT2_UNLOCK (autoconvert2);
+}
+
+static gboolean
+find_pad_templates (GstElementFactory * factory,
+    GstStaticPadTemplate ** sink_pad_template,
+    GstStaticPadTemplate ** src_pad_template)
+{
+  const GList *pad_templates =
+      gst_element_factory_get_static_pad_templates (factory);
+  const GList *it;
+
+  *sink_pad_template = NULL, *src_pad_template = NULL;
+
+  /* Find the source and sink pad templates. */
+  for (it = pad_templates; it; it = it->next) {
+    GstStaticPadTemplate *const pad_template =
+        (GstStaticPadTemplate *) it->data;
+    GstStaticPadTemplate **const selected_template =
+        (pad_template->direction == GST_PAD_SINK) ?
+        sink_pad_template : src_pad_template;
+
+    if (*selected_template) {
+      /* Found more than one sink template or source template. Abort. */
+      return FALSE;
+    }
+
+    *selected_template = pad_template;
+  }
+
+  /* Return true if both a sink and src pad template were found. */
+  return *sink_pad_template && *src_pad_template;
+}
+
+static struct FactoryListEntry *
+create_factory_index_entry (GstElementFactory * factory,
+    GstStaticPadTemplate * sink_pad_template,
+    GstStaticPadTemplate * src_pad_template)
+{
+  struct FactoryListEntry *entry = g_malloc (sizeof (struct FactoryListEntry));
+  entry->sink_pad_template = sink_pad_template;
+  entry->src_pad_template = src_pad_template;
+  entry->sink_caps = gst_static_caps_get (&sink_pad_template->static_caps);
+  entry->src_caps = gst_static_caps_get (&src_pad_template->static_caps);
+  g_object_ref ((GObject *) factory);
+  entry->factory = factory;
+  return entry;
+}
+
+static void
+destroy_factory_list_entry (struct FactoryListEntry *entry)
+{
+  gst_caps_unref (entry->sink_caps);
+  gst_caps_unref (entry->src_caps);
+  g_object_unref (entry->factory);
+  g_free (entry);
+}
+
+static void
+index_factories (GstAutoConvert2 * autoconvert2)
+{
+  const GstAutoConvert2Class *const klass =
+      GST_AUTO_CONVERT2_GET_CLASS (autoconvert2);
+  GList *it;
+  GstStaticPadTemplate *sink_pad_template, *src_pad_template;
+
+  if (!klass->get_factories) {
+    GST_ELEMENT_ERROR (autoconvert2, CORE, NOT_IMPLEMENTED,
+        ("No get_factories method has been implemented"), (NULL));
+    return;
+  }
+
+  /* Create the factory list entries and identify the pads. */
+  for (it = klass->get_factories (autoconvert2); it; it = it->next) {
+    GstElementFactory *const factory = GST_ELEMENT_FACTORY (it->data);
+    if (find_pad_templates (factory, &sink_pad_template, &src_pad_template)) {
+      struct FactoryListEntry *const entry =
+          create_factory_index_entry (factory, sink_pad_template,
+          src_pad_template);
+      autoconvert2->priv->factory_index =
+          g_slist_prepend (autoconvert2->priv->factory_index, entry);
+    }
+  }
 }
