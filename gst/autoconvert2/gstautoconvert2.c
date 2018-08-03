@@ -75,6 +75,12 @@ struct _GstAutoConvert2Priv
 
   /* List of element factories with their pad templates and caps constructed. */
   GSList *factory_index;
+
+  /* The union of the caps of all the converter sink caps. */
+  GstCaps *sink_caps;
+
+  /* The union of the caps of all the converter src caps. */
+  GstCaps *src_caps;
 };
 
 static void gst_auto_convert2_constructed (GObject * object);
@@ -100,6 +106,9 @@ static struct FactoryListEntry *create_factory_index_entry (GstElementFactory *
     GstStaticPadTemplate * src_pad_template);
 static void destroy_factory_list_entry (struct FactoryListEntry *entry);
 static void index_factories (GstAutoConvert2 * autoconvert2);
+
+static gboolean query_caps (GstAutoConvert2 * autoconvert2, GstQuery * query,
+    GstCaps * factory_caps, GList * pads);
 
 #define gst_auto_convert2_parent_class parent_class
 G_DEFINE_TYPE (GstAutoConvert2, gst_auto_convert2, GST_TYPE_BIN);
@@ -162,6 +171,10 @@ gst_auto_convert2_dispose (GObject * object)
   GstAutoConvert2 *const autoconvert2 = GST_AUTO_CONVERT2 (object);
   g_slist_free_full (autoconvert2->priv->factory_index,
       (GDestroyNotify) destroy_factory_list_entry);
+
+  gst_caps_unref (autoconvert2->priv->sink_caps);
+  gst_caps_unref (autoconvert2->priv->src_caps);
+
   G_OBJECT_CLASS (parent_class)->dispose (object);
 }
 
@@ -216,13 +229,33 @@ static gboolean
 gst_auto_convert2_sink_query (GstPad * pad, GstObject * parent,
     GstQuery * query)
 {
+  GstAutoConvert2 *const autoconvert2 = GST_AUTO_CONVERT2 (parent);
+
+  switch (GST_QUERY_TYPE (query)) {
+    case GST_QUERY_CAPS:
+      return query_caps (autoconvert2, query, autoconvert2->priv->sink_caps,
+          GST_ELEMENT (autoconvert2)->srcpads);
+
+    default:
+      break;
+  }
+
   return gst_pad_query_default (pad, parent, query);
 }
 
 static gboolean
 gst_auto_convert2_src_query (GstPad * pad, GstObject * parent, GstQuery * query)
 {
-  return gst_pad_query_default (pad, parent, query);
+  GstAutoConvert2 *const autoconvert2 = GST_AUTO_CONVERT2 (parent);
+
+  switch (GST_QUERY_TYPE (query)) {
+    case GST_QUERY_CAPS:
+      return query_caps (autoconvert2, query, autoconvert2->priv->src_caps,
+          GST_ELEMENT (autoconvert2)->sinkpads);
+
+    default:
+      return gst_pad_query_default (pad, parent, query);
+  }
 }
 
 static gboolean
@@ -286,6 +319,7 @@ index_factories (GstAutoConvert2 * autoconvert2)
   const GstAutoConvert2Class *const klass =
       GST_AUTO_CONVERT2_GET_CLASS (autoconvert2);
   GList *it;
+  GSList *i;
   GstStaticPadTemplate *sink_pad_template, *src_pad_template;
 
   if (!klass->get_factories) {
@@ -293,6 +327,9 @@ index_factories (GstAutoConvert2 * autoconvert2)
         ("No get_factories method has been implemented"), (NULL));
     return;
   }
+
+  autoconvert2->priv->sink_caps = gst_caps_new_empty ();
+  autoconvert2->priv->src_caps = gst_caps_new_empty ();
 
   /* Create the factory list entries and identify the pads. */
   for (it = klass->get_factories (autoconvert2); it; it = it->next) {
@@ -305,4 +342,49 @@ index_factories (GstAutoConvert2 * autoconvert2)
           g_slist_prepend (autoconvert2->priv->factory_index, entry);
     }
   }
+
+  /* Accumulate the union of all caps. */
+  for (i = autoconvert2->priv->factory_index; i; i = i->next) {
+    struct FactoryListEntry *const entry = (struct FactoryListEntry *) i->data;
+    gst_caps_ref (entry->sink_caps);
+    autoconvert2->priv->sink_caps =
+        gst_caps_merge (autoconvert2->priv->sink_caps, entry->sink_caps);
+
+    gst_caps_ref (entry->src_caps);
+    autoconvert2->priv->src_caps =
+        gst_caps_merge (autoconvert2->priv->src_caps, entry->src_caps);
+  }
+}
+
+static gboolean
+query_caps (GstAutoConvert2 * autoconvert2, GstQuery * query,
+    GstCaps * factory_caps, GList * pads)
+{
+  GList *it;
+  GstCaps *filter;
+  GstCaps *caps = gst_caps_new_empty ();
+
+  gst_query_parse_caps (query, &filter);
+
+  GST_AUTO_CONVERT2_LOCK (autoconvert2);
+  for (it = pads; it; it = it->next)
+    caps = gst_caps_merge (caps,
+        gst_pad_peer_query_caps ((GstPad *) it->data, filter));
+  GST_AUTO_CONVERT2_UNLOCK (autoconvert2);
+
+  gst_caps_ref (factory_caps);
+
+  if (filter) {
+    GstCaps *const filtered_factory_caps = gst_caps_intersect_full (filter,
+        factory_caps, GST_CAPS_INTERSECT_FIRST);
+    caps = gst_caps_merge (caps, filtered_factory_caps);
+  } else {
+    caps = gst_caps_merge (caps, factory_caps);
+  }
+
+  caps = gst_caps_normalize (caps);
+  gst_query_set_caps_result (query, caps);
+  gst_caps_unref (caps);
+
+  return TRUE;
 }
