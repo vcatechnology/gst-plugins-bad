@@ -44,12 +44,28 @@
 GST_DEBUG_CATEGORY (autoconvert2_debug);
 #define GST_CAT_DEFAULT (autoconvert2_debug)
 
+#define GST_AUTO_CONVERT2_GET_LOCK(autoconvert2) \
+  (&GST_AUTO_CONVERT2(autoconvert2)->priv->lock)
+#define GST_AUTO_CONVERT2_LOCK(autoconvert2) \
+  (g_mutex_lock (GST_AUTO_CONVERT2_GET_LOCK (autoconvert2)))
+#define GST_AUTO_CONVERT2_UNLOCK(autoconvert2) \
+  (g_mutex_unlock (GST_AUTO_CONVERT2_GET_LOCK (autoconvert2)))
+
+struct _GstAutoConvert2Priv
+{
+  /* Lock to prevent caps pipeline structure changes during changes to pads. */
+  GMutex lock;
+};
+
+static void gst_auto_convert2_finalize (GObject * object);
+
 #define gst_auto_convert2_parent_class parent_class
 G_DEFINE_TYPE (GstAutoConvert2, gst_auto_convert2, GST_TYPE_BIN);
 
 static void
 gst_auto_convert2_class_init (GstAutoConvert2Class * klass)
 {
+  GObjectClass *const gobject_class = (GObjectClass *) klass;
   GstElementClass *const gstelement_class = (GstElementClass *) klass;
 
   GST_DEBUG_CATEGORY_INIT (autoconvert2_debug, "autoconvert2", 0,
@@ -59,9 +75,22 @@ gst_auto_convert2_class_init (GstAutoConvert2Class * klass)
       "Selects conversion elements based on caps", "Generic/Bin",
       "Creates a graph of transform elements based on the caps",
       "Joel Holdsworth <joel.holdsworth@vcatechnology.com>");
+
+  gobject_class->finalize = GST_DEBUG_FUNCPTR (gst_auto_convert2_finalize);
 }
 
 static void
 gst_auto_convert2_init (GstAutoConvert2 * autoconvert2)
 {
+  autoconvert2->priv = g_malloc0 (sizeof (GstAutoConvert2Priv));
+  g_mutex_init (&autoconvert2->priv->lock);
+}
+
+static void
+gst_auto_convert2_finalize (GObject * object)
+{
+  GstAutoConvert2 *const autoconvert2 = GST_AUTO_CONVERT2 (object);
+
+  g_mutex_clear (&autoconvert2->priv->lock);
+  g_free (autoconvert2->priv);
 }

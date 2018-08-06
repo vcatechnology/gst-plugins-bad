@@ -36,9 +36,14 @@ G_BEGIN_DECLS
 typedef struct _GstAutoConvert2 GstAutoConvert2;
 typedef struct _GstAutoConvert2Class GstAutoConvert2Class;
 
+typedef struct _GstAutoConvert2Priv GstAutoConvert2Priv;
+
 struct _GstAutoConvert2
 {
   GstBin bin;                   /* we extend GstBin */
+
+  /* Internal private data. */
+  GstAutoConvert2Priv *priv;
 };
 
 struct _GstAutoConvert2Class
