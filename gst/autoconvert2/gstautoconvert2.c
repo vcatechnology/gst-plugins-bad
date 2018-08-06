@@ -110,6 +110,8 @@ static void index_factories (GstAutoConvert2 * autoconvert2);
 static gboolean query_caps (GstAutoConvert2 * autoconvert2, GstQuery * query,
     GstCaps * factory_caps, GList * pads);
 
+static void build_graph (GstAutoConvert2 * autoconvert2);
+
 #define gst_auto_convert2_parent_class parent_class
 G_DEFINE_TYPE (GstAutoConvert2, gst_auto_convert2, GST_TYPE_BIN);
 
@@ -222,6 +224,33 @@ static gboolean
 gst_auto_convert2_sink_event (GstPad * pad, GstObject * parent,
     GstEvent * event)
 {
+  GstAutoConvert2 *const autoconvert2 = GST_AUTO_CONVERT2 (parent);
+
+  switch (GST_EVENT_TYPE (event)) {
+    case GST_EVENT_CAPS:{
+      GList *it;
+
+      gst_pad_store_sticky_event (pad, event);
+      GST_AUTO_CONVERT2_LOCK (autoconvert2);
+
+      for (it = GST_ELEMENT (autoconvert2)->sinkpads; it; it = it->next)
+        if (!gst_pad_has_current_caps ((GstPad *) it->data))
+          break;
+
+      /* If every pad has received a sticky caps event, then we can start
+       * building the transformation routes. */
+      if (!it)
+        build_graph (autoconvert2);
+
+      GST_AUTO_CONVERT2_UNLOCK (autoconvert2);
+
+      break;
+    }
+
+    default:
+      break;
+  }
+
   return gst_pad_event_default (pad, parent, event);
 }
 
@@ -387,4 +416,9 @@ query_caps (GstAutoConvert2 * autoconvert2, GstQuery * query,
   gst_caps_unref (caps);
 
   return TRUE;
+}
+
+static void
+build_graph (GstAutoConvert2 * autoconvert2)
+{
 }
