@@ -87,6 +87,9 @@ static void gst_auto_convert2_constructed (GObject * object);
 static void gst_auto_convert2_finalize (GObject * object);
 static void gst_auto_convert2_dispose (GObject * object);
 
+static gboolean gst_auto_convert2_validate_transform_route (GstAutoConvert2 *
+    autoconvert2, const GstAutoConvert2TransformRoute * route);
+
 static GstPad *gst_auto_convert2_request_new_pad (GstElement * element,
     GstPadTemplate * templ, const gchar * name, const GstCaps * caps);
 static void gst_auto_convert2_release_pad (GstElement * element, GstPad * pad);
@@ -131,6 +134,9 @@ gst_auto_convert2_class_init (GstAutoConvert2Class * klass)
 
   gst_element_class_add_static_pad_template (gstelement_class, &srctemplate);
   gst_element_class_add_static_pad_template (gstelement_class, &sinktemplate);
+
+  klass->validate_transform_route =
+      GST_DEBUG_FUNCPTR (gst_auto_convert2_validate_transform_route);
 
   gstelement_class->request_new_pad =
       GST_DEBUG_FUNCPTR (gst_auto_convert2_request_new_pad);
@@ -178,6 +184,13 @@ gst_auto_convert2_dispose (GObject * object)
   gst_caps_unref (autoconvert2->priv->src_caps);
 
   G_OBJECT_CLASS (parent_class)->dispose (object);
+}
+
+static gboolean
+gst_auto_convert2_validate_transform_route (GstAutoConvert2 * autoconvert2,
+    const GstAutoConvert2TransformRoute * route)
+{
+  return TRUE;
 }
 
 static GstPad *

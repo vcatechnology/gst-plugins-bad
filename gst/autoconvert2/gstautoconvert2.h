@@ -38,6 +38,14 @@ typedef struct _GstAutoConvert2Class GstAutoConvert2Class;
 
 typedef struct _GstAutoConvert2Priv GstAutoConvert2Priv;
 
+typedef struct
+{
+  struct {
+    GstPad *pad;
+    GstCaps *caps;
+  } sink, src;
+} GstAutoConvert2TransformRoute;
+
 struct _GstAutoConvert2
 {
   GstBin bin;                   /* we extend GstBin */
@@ -51,6 +59,8 @@ struct _GstAutoConvert2Class
   GstBinClass parent_class;
 
   GList* (*get_factories) (GstAutoConvert2 * autoconvert2);
+  gboolean (*validate_transform_route) (GstAutoConvert2 * autoconvert2,
+    const GstAutoConvert2TransformRoute * route);
 };
 
 GType gst_auto_convert2_get_type (void);
