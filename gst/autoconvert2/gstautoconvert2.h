@@ -46,6 +46,13 @@ typedef struct
   } sink, src;
 } GstAutoConvert2TransformRoute;
 
+typedef struct
+{
+  GstElementFactory *factory;
+  GstStaticPadTemplate *sink_pad_template, *src_pad_template;
+  GstCaps *sink_caps, *src_caps;
+} GstAutoConvert2TransformationStep;
+
 struct _GstAutoConvert2
 {
   GstBin bin;                   /* we extend GstBin */
@@ -64,6 +71,9 @@ struct _GstAutoConvert2Class
   int (*validate_chain) (GstAutoConvert2 * autoconvert2,
     GstCaps *chain_sink_caps, GstCaps *chain_src_caps, GSList **chain,
     guint chain_length);
+  guint (*cost_transformation_step) (GstAutoConvert2 * autoconvert2,
+    const GstAutoConvert2TransformationStep * transformation_step);
+
 };
 
 GType gst_auto_convert2_get_type (void);

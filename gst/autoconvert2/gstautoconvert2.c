@@ -76,6 +76,27 @@ struct ChainGenerator
   gboolean init;
 };
 
+struct ProposalParent
+{
+  struct Proposal *proposal;
+  union
+  {
+    GstPad *pad;
+    unsigned int parent_step;
+  };
+};
+
+struct Proposal
+{
+  struct ProposalParent parent;
+
+  GstPad *src_pad;
+
+  guint step_count;
+  GstAutoConvert2TransformationStep *steps;
+  guint cost;
+};
+
 struct _GstAutoConvert2Priv
 {
   /* Lock to prevent caps pipeline structure changes during changes to pads. */
@@ -139,6 +160,16 @@ static gboolean advance_chain_generator (struct ChainGenerator *generator,
     GSList * factory_index, guint starting_depth);
 static gboolean generate_next_chain (GstAutoConvert2 * autoconvert2,
     struct ChainGenerator *generator);
+
+static struct Proposal
+    *create_proposal (const struct ProposalParent *parent, GstPad * src_pad,
+    guint step_count);
+static struct Proposal
+    *create_costed_proposal_from_instantiated_chain (GstAutoConvert2 *
+    autoconvert2, const struct ChainGenerator *gen,
+    const struct ProposalParent *parent, GstPad * src_pad,
+    GstElement ** elements);
+static void destroy_proposal (struct Proposal *proposal);
 
 static void build_graph (GstAutoConvert2 * autoconvert2);
 
@@ -595,6 +626,85 @@ generate_next_chain (GstAutoConvert2 * autoconvert2, struct ChainGenerator *gen)
     if (depth > 0)
       depth--;
   }
+}
+
+static struct Proposal *
+create_proposal (const struct ProposalParent *parent, GstPad * src_pad,
+    guint step_count)
+{
+  struct Proposal *const p = g_malloc0 (sizeof (struct Proposal));
+  if (parent)
+    p->parent = *parent;
+  p->step_count = step_count;
+  p->src_pad = src_pad;
+  gst_object_ref (GST_OBJECT (p->src_pad));
+  p->steps =
+      g_malloc0 (sizeof (GstAutoConvert2TransformationStep) * step_count);
+  return p;
+}
+
+static struct Proposal *
+create_costed_proposal_from_instantiated_chain (GstAutoConvert2 * autoconvert2,
+    const struct ChainGenerator *gen, const struct ProposalParent *parent,
+    GstPad * src_pad, GstElement ** elements)
+{
+  const GstAutoConvert2Class *const klass =
+      GST_AUTO_CONVERT2_GET_CLASS (autoconvert2);
+  struct Proposal *const proposal = create_proposal (parent, src_pad,
+      gen->length);
+  guint i;
+  GstPad *pad;
+
+  for (i = 0; i != gen->length; i++) {
+    const GstElement *const element = elements[i];
+    const struct FactoryListEntry *const entry = gen->iterators[i]->data;
+    GstAutoConvert2TransformationStep *const step = proposal->steps + i;
+
+    step->sink_pad_template = entry->sink_pad_template;
+    step->src_pad_template = entry->src_pad_template;
+
+    g_warn_if_fail (element->numsrcpads == 1);
+    g_warn_if_fail (element->srcpads);
+
+    pad = (GstPad *) element->sinkpads->data;
+    g_warn_if_fail (pad);
+    step->sink_caps = gst_pad_get_current_caps (pad);
+
+    pad = (GstPad *) element->srcpads->data;
+    g_warn_if_fail (pad);
+    step->src_caps = gst_pad_get_current_caps (pad);
+
+    step->factory = entry->factory;
+    gst_object_ref (GST_OBJECT (step->factory));
+
+    proposal->cost += klass->cost_transformation_step ?
+        klass->cost_transformation_step (autoconvert2, step) : 1;
+  }
+
+  return proposal;
+}
+
+static void
+destroy_proposal (struct Proposal *proposal)
+{
+  guint i;
+
+  if (!proposal)
+    return;
+
+  for (i = 0; i != proposal->step_count; i++) {
+    GstAutoConvert2TransformationStep *const step = proposal->steps + i;
+    if (step->sink_caps)
+      gst_caps_unref (step->sink_caps);
+    if (step->src_caps)
+      gst_caps_unref (step->src_caps);
+    if (step->factory)
+      gst_object_unref (GST_OBJECT (step->factory));
+  }
+
+  gst_object_unref (GST_OBJECT (proposal->src_pad));
+  g_free (proposal->steps);
+  g_free (proposal);
 }
 
 static void
