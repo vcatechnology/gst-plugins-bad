@@ -34,6 +34,7 @@
  * will convert to the new caps.
  */
 
+#include <string.h>
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
@@ -171,7 +172,15 @@ static struct Proposal
     GstElement ** elements);
 static void destroy_proposal (struct Proposal *proposal);
 
+static GstElement *create_test_element (GstAutoConvert2 * autoconvert2,
+    GstElementFactory * factory, guint index);
+static GstElement *get_test_element (GstAutoConvert2 * autoconvert2,
+    GHashTable * test_element_cache, GstElementFactory * factory);
+static void destroy_cache_factory_elements (GSList * entries);
+
 static void build_graph (GstAutoConvert2 * autoconvert2);
+
+static GQuark in_use_quark = 0;
 
 #define gst_auto_convert2_parent_class parent_class
 G_DEFINE_TYPE (GstAutoConvert2, gst_auto_convert2, GST_TYPE_BIN);
@@ -184,6 +193,8 @@ gst_auto_convert2_class_init (GstAutoConvert2Class * klass)
 
   GST_DEBUG_CATEGORY_INIT (autoconvert2_debug, "autoconvert2", 0,
       "autoconvert2 element");
+
+  in_use_quark = g_quark_from_static_string ("in_use");
 
   gst_element_class_set_static_metadata (gstelement_class,
       "Selects conversion elements based on caps", "Generic/Bin",
@@ -705,6 +716,62 @@ destroy_proposal (struct Proposal *proposal)
   gst_object_unref (GST_OBJECT (proposal->src_pad));
   g_free (proposal->steps);
   g_free (proposal);
+}
+
+static GstElement *
+create_test_element (GstAutoConvert2 * autoconvert2,
+    GstElementFactory * factory, guint index)
+{
+  gchar *const factory_name = gst_object_get_name (GST_OBJECT (factory));
+  gchar *const element_name = g_strdup_printf ("test_%s_%u", factory_name,
+      index);
+  GstElement *const element =
+      gst_element_factory_create (factory, element_name);
+  gst_element_set_parent (element, GST_OBJECT (autoconvert2));
+  g_free (factory_name);
+  g_free (element_name);
+
+  return element;
+}
+
+static GstElement *
+get_test_element (GstAutoConvert2 * autoconvert2,
+    GHashTable * test_element_cache, GstElementFactory * factory)
+{
+  GstElement *element = NULL;
+  GSList *it, *factory_elements =
+      g_hash_table_lookup (test_element_cache, factory);
+
+  for (it = factory_elements; it; it = it->next)
+    if (!g_object_get_qdata (G_OBJECT (it->data), in_use_quark)) {
+      element = (GstElement *) it->data;
+      break;
+    }
+
+  if (!element) {
+    g_hash_table_steal (test_element_cache, factory);
+    element = create_test_element (autoconvert2, factory,
+        g_slist_length (factory_elements));
+    factory_elements = g_slist_prepend (factory_elements, element);
+    g_hash_table_replace (test_element_cache, factory, factory_elements);
+  }
+
+  g_object_set_qdata (G_OBJECT (element), in_use_quark, GINT_TO_POINTER (TRUE));
+
+  return element;
+}
+
+static void
+destroy_cache_factory_elements (GSList * entries)
+{
+  GSList *it;
+  for (it = entries; it; it = it->next) {
+    GstElement *const e = (GstElement *) it->data;
+    gst_element_set_state (e, GST_STATE_NULL);
+    gst_object_unparent (GST_OBJECT (e));
+  }
+
+  g_slist_free (entries);
 }
 
 static void
