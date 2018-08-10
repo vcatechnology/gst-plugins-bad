@@ -113,6 +113,8 @@ struct _GstAutoConvert2Priv
   GstCaps *src_caps;
 };
 
+static const guint MaxChainLength = 4;
+
 static void gst_auto_convert2_constructed (GObject * object);
 static void gst_auto_convert2_finalize (GObject * object);
 static void gst_auto_convert2_dispose (GObject * object);
@@ -181,10 +183,30 @@ static void destroy_cache_factory_elements (GSList * entries);
 static GstPad *get_element_pad (GstElement * element, const gchar * pad_name);
 static void release_element_pad (GstPad * pad);
 
+static gboolean check_instantiated_chain (GstCaps * sink_caps,
+    GstPad * chain_sink_pad);
+
+static gboolean test_sink_query (GstPad * pad, GstObject * parent,
+    GstQuery * query);
+
+static struct Proposal *try_chain (GstAutoConvert2 * autoconvert2,
+    GHashTable * test_element_cache, struct ChainGenerator *gen,
+    const struct ProposalParent *parent, GstCaps * sink_caps, GstPad * src_pad,
+    GstCaps * src_caps);
+static struct Proposal *try_passthrough (const struct ProposalParent *parent,
+    GstCaps * sink_caps, GstPad * src_pad);
+
+static GSList *generate_transform_route_proposals (GstAutoConvert2 *
+    autoconvert2, GHashTable * const test_element_cache,
+    const GstAutoConvert2TransformRoute * route,
+    const struct ProposalParent *parent, GSList * proposals);
+static GSList *generate_proposals (GstAutoConvert2 * autoconvert2);
+
 static void build_graph (GstAutoConvert2 * autoconvert2);
 
 static GQuark in_use_quark = 0;
 static GQuark is_request_pad_quark = 0;
+static GQuark src_caps_quark = 0;
 
 #define gst_auto_convert2_parent_class parent_class
 G_DEFINE_TYPE (GstAutoConvert2, gst_auto_convert2, GST_TYPE_BIN);
@@ -200,6 +222,7 @@ gst_auto_convert2_class_init (GstAutoConvert2Class * klass)
 
   in_use_quark = g_quark_from_static_string ("in_use");
   is_request_pad_quark = g_quark_from_static_string ("is_request_pad");
+  src_caps_quark = g_quark_from_static_string ("src_caps");
 
   gst_element_class_set_static_metadata (gstelement_class,
       "Selects conversion elements based on caps", "Generic/Bin",
@@ -690,9 +713,17 @@ create_costed_proposal_from_instantiated_chain (GstAutoConvert2 * autoconvert2,
     g_warn_if_fail (pad);
     step->src_caps = gst_pad_get_current_caps (pad);
 
+    if (!step->sink_caps || !step->src_caps) {
+      destroy_proposal (proposal);
+      return NULL;
+    }
+
     step->factory = entry->factory;
     gst_object_ref (GST_OBJECT (step->factory));
+  }
 
+  for (i = 0; i != gen->length; i++) {
+    GstAutoConvert2TransformationStep *const step = proposal->steps + i;
     proposal->cost += klass->cost_transformation_step ?
         klass->cost_transformation_step (autoconvert2, step) : 1;
   }
@@ -766,6 +797,19 @@ get_test_element (GstAutoConvert2 * autoconvert2,
   return element;
 }
 
+static void
+destroy_cache_factory_elements (GSList * entries)
+{
+  GSList *it;
+  for (it = entries; it; it = it->next) {
+    GstElement *const e = (GstElement *) it->data;
+    gst_element_set_state (e, GST_STATE_NULL);
+    gst_object_unparent (GST_OBJECT (e));
+  }
+
+  g_slist_free (entries);
+}
+
 static GstPad *
 get_element_pad (GstElement * element, const gchar * pad_name)
 {
@@ -798,20 +842,212 @@ release_element_pad (GstPad * pad)
   gst_object_unref (element);
 }
 
-static void
-destroy_cache_factory_elements (GSList * entries)
+static gboolean
+check_instantiated_chain (GstCaps * sink_caps, GstPad * chain_sink_pad)
 {
-  GSList *it;
-  for (it = entries; it; it = it->next) {
-    GstElement *const e = (GstElement *) it->data;
-    gst_element_set_state (e, GST_STATE_NULL);
-    gst_object_unparent (GST_OBJECT (e));
+  GstCaps *const chain_sink_caps = gst_pad_query_caps (chain_sink_pad, NULL);
+  const gboolean can_intersect =
+      gst_caps_can_intersect (chain_sink_caps, sink_caps);
+  gst_caps_unref (chain_sink_caps);
+  return can_intersect;
+}
+
+static gboolean
+test_sink_query (GstPad * pad, GstObject * parent, GstQuery * query)
+{
+  switch (GST_QUERY_TYPE (query)) {
+    case GST_QUERY_CAPS:{
+      GstCaps *const caps = g_object_get_qdata (G_OBJECT (pad), src_caps_quark);
+      gst_query_set_caps_result (query, caps);
+      return TRUE;
+    }
+
+    default:
+      return gst_pad_query_default (pad, parent, query);
+  }
+}
+
+static struct Proposal *
+try_chain (GstAutoConvert2 * autoconvert2, GHashTable * test_element_cache,
+    struct ChainGenerator *gen, const struct ProposalParent *parent,
+    GstCaps * sink_caps, GstPad * src_pad, GstCaps * src_caps)
+{
+  guint i;
+  GstElement **elements = g_malloc0 (sizeof (GstElement *) * gen->length);
+  GstPad **element_sink_pads = g_malloc0 (sizeof (GstPad *) * gen->length);
+  GstPad **element_src_pads = g_malloc0 (sizeof (GstPad *) * gen->length);
+  GstPad *test_sink_pad = NULL;
+  struct Proposal *proposal = NULL;
+
+  /* Create the and link the elements. */
+  for (i = 0; i != gen->length; i++) {
+    struct FactoryListEntry *const entry = gen->iterators[i]->data;
+    elements[i] = get_test_element (autoconvert2, test_element_cache,
+        entry->factory);
+    gst_element_sync_state_with_parent (elements[i]);
+
+    element_sink_pads[i] =
+        get_element_pad (elements[i], entry->sink_pad_template->name_template);
+    element_src_pads[i] =
+        get_element_pad (elements[i], entry->src_pad_template->name_template);
+
+    if (i != 0) {
+      const GstPadLinkReturn ret = gst_pad_link_full (element_src_pads[i - 1],
+          element_sink_pads[i],
+          GST_PAD_LINK_CHECK_NOTHING | GST_PAD_LINK_CHECK_NO_RECONFIGURE);
+      if (ret != GST_PAD_LINK_OK)
+        goto abort;
+    }
   }
 
-  g_slist_free (entries);
+  /* Link it to a dummy pad that will represent the down-stream element. */
+  test_sink_pad = gst_pad_new ("test_sink_pad", GST_PAD_SINK);
+  gst_pad_set_active (test_sink_pad, TRUE);
+  g_object_set_qdata (G_OBJECT (test_sink_pad), src_caps_quark, src_caps);
+  gst_pad_set_query_function (test_sink_pad, test_sink_query);
+
+  gst_pad_link_full (element_src_pads[gen->length - 1], test_sink_pad,
+      GST_PAD_LINK_CHECK_NOTHING | GST_PAD_LINK_CHECK_NO_RECONFIGURE);
+
+  /* Test if the caps are compatible with the chain. */
+  if (check_instantiated_chain (sink_caps, element_sink_pads[0])) {
+    /* Send a caps event so that the elements apply the caps. */
+    if (gst_pad_send_event (element_sink_pads[0],
+            gst_event_new_caps (sink_caps))) {
+      /* If the caps applied successfully, create a costed proposal from the
+       * the element chain. */
+      proposal = create_costed_proposal_from_instantiated_chain (autoconvert2,
+          gen, parent, src_pad, elements);
+    }
+  }
+
+  /* Tidy up. */
+abort:
+  if (test_sink_pad) {
+    gst_pad_set_active (test_sink_pad, FALSE);
+    gst_pad_unlink (element_src_pads[gen->length - 1], test_sink_pad);
+    gst_object_unref (test_sink_pad);
+  }
+
+  if (elements[0]) {
+    for (i = 1; i != gen->length; i++) {
+      if (!elements[i])
+        break;
+      gst_pad_unlink (element_src_pads[i - 1], element_sink_pads[i]);
+    }
+  }
+
+  for (i = 0; i != gen->length; i++) {
+    release_element_pad (element_sink_pads[i]);
+    gst_object_unref (element_sink_pads[i]);
+    release_element_pad (element_src_pads[i]);
+    gst_object_unref (element_src_pads[i]);
+
+    if (elements[i])
+      g_object_set_qdata (G_OBJECT (elements[i]), in_use_quark,
+          GINT_TO_POINTER (FALSE));
+  }
+
+  g_free (elements);
+  g_free (element_sink_pads);
+  g_free (element_src_pads);
+
+  return proposal;
+}
+
+static struct Proposal *
+try_passthrough (const struct ProposalParent *parent, GstCaps * sink_caps,
+    GstPad * src_pad)
+{
+  struct Proposal *proposal = NULL;
+  GstPad *const src_peer_pad = gst_pad_get_peer (src_pad);
+  if (check_instantiated_chain (sink_caps, src_peer_pad))
+    proposal = create_proposal (parent, src_pad, 0);
+  gst_object_unref (GST_OBJECT (src_peer_pad));
+  return proposal;
+}
+
+static GSList *
+generate_transform_route_proposals (GstAutoConvert2 * autoconvert2,
+    GHashTable * const test_element_cache,
+    const GstAutoConvert2TransformRoute * route,
+    const struct ProposalParent *parent, GSList * proposals)
+{
+  GSList *orig_proposals = proposals;
+  struct Proposal *proposal;
+  guint length;
+  struct ChainGenerator generator;
+
+  if (!GST_AUTO_CONVERT2_GET_CLASS (autoconvert2)->validate_transform_route
+      (autoconvert2, route))
+    return proposals;
+
+  if ((proposal = try_passthrough (parent, route->sink.caps, route->src.pad))) {
+    proposals = g_slist_prepend (proposals, proposal);
+  } else {
+    for (length = 1; length <= MaxChainLength && proposals == orig_proposals;
+        length++) {
+      init_chain_generator (&generator, autoconvert2->priv->factory_index,
+          route, length);
+      while (generate_next_chain (autoconvert2, &generator)) {
+        if ((proposal = try_chain (autoconvert2, test_element_cache,
+                    &generator, parent, route->sink.caps, route->src.pad,
+                    route->src.caps))) {
+          proposals = g_slist_prepend (proposals, proposal);
+        }
+      }
+      destroy_chain_generator (&generator);
+    }
+  }
+
+  return proposals;
+}
+
+static GSList *
+generate_proposals (GstAutoConvert2 * autoconvert2)
+{
+  GList *i;
+  GSList *proposals = NULL, *proposal_yield = NULL;
+  GHashTable *const test_element_cache =
+      g_hash_table_new_full (g_direct_hash, g_direct_equal, NULL,
+      (GDestroyNotify) destroy_cache_factory_elements);
+
+  /* Generate direct sink-pad to source-pad proposals. */
+  for (i = GST_ELEMENT (autoconvert2)->srcpads; i; i = i->next) {
+    GstPad *const src_pad = (GstPad *) i->data;
+    GstCaps *const src_caps = gst_pad_peer_query_caps (src_pad, NULL);
+    GList *j;
+
+    for (j = GST_ELEMENT (autoconvert2)->sinkpads; j; j = j->next) {
+      GstPad *const sink_pad = (GstPad *) j->data;
+      GstCaps *const sink_caps = gst_pad_get_current_caps (sink_pad);
+      const GstAutoConvert2TransformRoute transform_route = {
+        {sink_pad, sink_caps}, {src_pad, src_caps}
+      };
+      const struct ProposalParent p = {
+        .proposal = NULL,
+        .pad = sink_pad
+      };
+
+      proposal_yield = generate_transform_route_proposals (autoconvert2,
+          test_element_cache, &transform_route, &p, proposal_yield);
+
+      gst_caps_unref (sink_caps);
+    }
+
+    gst_caps_unref (src_caps);
+  }
+
+  proposals = proposal_yield;
+
+  g_hash_table_destroy (test_element_cache);
+
+  return proposals;
 }
 
 static void
 build_graph (GstAutoConvert2 * autoconvert2)
 {
+  GSList *const proposals = generate_proposals (autoconvert2);
+  g_slist_free_full (proposals, (GDestroyNotify) destroy_proposal);
 }
