@@ -178,9 +178,13 @@ static GstElement *get_test_element (GstAutoConvert2 * autoconvert2,
     GHashTable * test_element_cache, GstElementFactory * factory);
 static void destroy_cache_factory_elements (GSList * entries);
 
+static GstPad *get_element_pad (GstElement * element, const gchar * pad_name);
+static void release_element_pad (GstPad * pad);
+
 static void build_graph (GstAutoConvert2 * autoconvert2);
 
 static GQuark in_use_quark = 0;
+static GQuark is_request_pad_quark = 0;
 
 #define gst_auto_convert2_parent_class parent_class
 G_DEFINE_TYPE (GstAutoConvert2, gst_auto_convert2, GST_TYPE_BIN);
@@ -195,6 +199,7 @@ gst_auto_convert2_class_init (GstAutoConvert2Class * klass)
       "autoconvert2 element");
 
   in_use_quark = g_quark_from_static_string ("in_use");
+  is_request_pad_quark = g_quark_from_static_string ("is_request_pad");
 
   gst_element_class_set_static_metadata (gstelement_class,
       "Selects conversion elements based on caps", "Generic/Bin",
@@ -759,6 +764,38 @@ get_test_element (GstAutoConvert2 * autoconvert2,
   g_object_set_qdata (G_OBJECT (element), in_use_quark, GINT_TO_POINTER (TRUE));
 
   return element;
+}
+
+static GstPad *
+get_element_pad (GstElement * element, const gchar * pad_name)
+{
+  GstPad *pad = NULL;
+
+  g_warn_if_fail (pad_name);
+
+  if (!(pad = gst_element_get_static_pad (element, pad_name)))
+    if ((pad = gst_element_get_request_pad (element, pad_name)))
+      g_object_set_qdata (G_OBJECT (pad), is_request_pad_quark,
+          GINT_TO_POINTER (TRUE));
+
+  return pad;
+}
+
+static void
+release_element_pad (GstPad * pad)
+{
+  GstElement *const element = gst_pad_get_parent_element (pad);
+
+  g_warn_if_fail (pad);
+  if (g_object_get_qdata (G_OBJECT (pad), is_request_pad_quark)) {
+    gst_object_ref (pad);
+    g_warn_if_fail (element);
+    gst_element_release_request_pad (element, pad);
+    g_object_set_qdata (G_OBJECT (pad), is_request_pad_quark,
+        GINT_TO_POINTER (FALSE));
+    gst_object_unref (pad);
+  }
+  gst_object_unref (element);
 }
 
 static void
