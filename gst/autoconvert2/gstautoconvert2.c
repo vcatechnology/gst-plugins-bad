@@ -200,6 +200,9 @@ static GSList *generate_transform_route_proposals (GstAutoConvert2 *
     autoconvert2, GHashTable * const test_element_cache,
     const GstAutoConvert2TransformRoute * route,
     const struct ProposalParent *parent, GSList * proposals);
+static GSList *generate_branch_proposals (GstAutoConvert2 * autoconvert2,
+    GHashTable * const test_element_cache, struct Proposal *parent,
+    GstPad * src_pad, GSList * proposals);
 static GSList *generate_proposals (GstAutoConvert2 * autoconvert2);
 
 static void build_graph (GstAutoConvert2 * autoconvert2);
@@ -1004,10 +1007,47 @@ generate_transform_route_proposals (GstAutoConvert2 * autoconvert2,
 }
 
 static GSList *
+generate_branch_proposals (GstAutoConvert2 * autoconvert2,
+    GHashTable * const test_element_cache, struct Proposal *parent,
+    GstPad * src_pad, GSList * proposals)
+{
+  const struct Proposal *proposal;
+  unsigned int i;
+  GstCaps *const src_caps = gst_pad_peer_query_caps (src_pad, NULL);
+
+  g_warn_if_fail (parent);
+
+  /* Check the pad is not already attached to a parent proposal. */
+  for (proposal = parent; proposal; proposal = proposal->parent.proposal)
+    if (proposal->src_pad == src_pad)
+      goto done;
+
+  /* Generate the best proposal if possible. */
+  for (i = 0; i != parent->step_count; i++) {
+    GstCaps *const sink_caps = parent->steps[i].src_caps;
+    const GstAutoConvert2TransformRoute transform_route = {
+      {NULL, sink_caps}, {src_pad, src_caps}
+    };
+    const struct ProposalParent p = {
+      .proposal = parent,
+      .parent_step = i
+    };
+
+    proposals = generate_transform_route_proposals (autoconvert2,
+        test_element_cache, &transform_route, &p, proposals);
+  };
+
+done:
+  gst_caps_unref (src_caps);
+
+  return proposals;
+}
+
+static GSList *
 generate_proposals (GstAutoConvert2 * autoconvert2)
 {
   GList *i;
-  GSList *proposals = NULL, *proposal_yield = NULL;
+  GSList *proposals = NULL, *proposal_yield = NULL, *prev_proposal_yield = NULL;
   GHashTable *const test_element_cache =
       g_hash_table_new_full (g_direct_hash, g_direct_equal, NULL,
       (GDestroyNotify) destroy_cache_factory_elements);
@@ -1038,7 +1078,24 @@ generate_proposals (GstAutoConvert2 * autoconvert2)
     gst_caps_unref (src_caps);
   }
 
-  proposals = proposal_yield;
+  while (proposal_yield) {
+    proposals = g_slist_concat (proposals, g_slist_copy (proposal_yield));
+    g_slist_free (prev_proposal_yield);
+    prev_proposal_yield = proposal_yield;
+    proposal_yield = NULL;
+
+    /* For every proposal in the previous generation, generate branches,
+     * that link to every src pad. */
+    for (i = GST_ELEMENT (autoconvert2)->srcpads; i; i = i->next) {
+      GstPad *const src_pad = (GstPad *) i->data;
+      GSList *j;
+
+      for (j = prev_proposal_yield; j; j = j->next)
+        proposal_yield = generate_branch_proposals (autoconvert2,
+            test_element_cache, (struct Proposal *) j->data, src_pad,
+            proposal_yield);
+    }
+  }
 
   g_hash_table_destroy (test_element_cache);
 
