@@ -205,6 +205,10 @@ static GSList *generate_branch_proposals (GstAutoConvert2 * autoconvert2,
     GstPad * src_pad, GSList * proposals);
 static GSList *generate_proposals (GstAutoConvert2 * autoconvert2);
 
+static GHashTable *index_pads (GList * pad_list, guint * pad_count);
+static GSList *select_proposals (GstAutoConvert2 * autoconvert2,
+    GSList * proposals);
+
 static void build_graph (GstAutoConvert2 * autoconvert2);
 
 static GQuark in_use_quark = 0;
@@ -1102,9 +1106,96 @@ generate_proposals (GstAutoConvert2 * autoconvert2)
   return proposals;
 }
 
+static GHashTable *
+index_pads (GList * pad_list, guint * pad_count)
+{
+  const GList *it;
+  guint index = 0;
+  GHashTable *const table = g_hash_table_new (NULL, NULL);
+  for (it = pad_list; it; it = it->next)
+    g_hash_table_insert (table, it->data, GUINT_TO_POINTER (index++));
+  *pad_count = index;
+  return table;
+}
+
+static GSList *
+select_proposals (GstAutoConvert2 * autoconvert2, GSList * proposals)
+{
+  guint set, subset;
+  const GSList *it;
+  guint src_count;
+  GHashTable *const src_id_table =
+      index_pads (GST_ELEMENT (autoconvert2)->srcpads, &src_count);
+  GSList *result, **selected_proposals =
+      g_malloc0 (sizeof (GHashTable *) * (1 << src_count));
+  guint *min_costs = g_malloc (sizeof (guint) * (1 << src_count));
+
+  /* Fill the cost matrix with UINT_MAX i.e. all unspecified links have
+   * infinite cost. */
+  memset (min_costs, 0xFF, sizeof (guint) * (1 << src_count));
+
+  /* First populate the cost table with the proposals. */
+  for (it = proposals; it; it = it->next) {
+    struct Proposal *p;
+    GSList *selection = NULL;
+    guint src_set = 0, cost = 0;
+    for (p = (struct Proposal *) it->data; p; p = p->parent.proposal) {
+      selection = g_slist_prepend (selection, p);
+      src_set |=
+          1 << GPOINTER_TO_UINT (g_hash_table_lookup (src_id_table,
+              p->src_pad));
+      cost += p->cost;
+    }
+
+    if (cost < min_costs[src_set]) {
+      min_costs[src_set] = cost;
+      selected_proposals[src_set] = selection;
+    }
+  }
+
+  /* For every possible set of source pads, divide that set in half in every
+   * possible way. Then, if the cost of the subset plus the cost of the
+   * remainder is lower than the current cost of the currently selected set of
+   * proposals, use these proposals instead. Continue to expand the set of pads
+   * until the optimal set of proposals is determined. */
+  for (set = 1; set != (1 << src_count); set++) {
+    guint cost = min_costs[set];
+    GSList *selected = selected_proposals[set];
+    for (subset = set; subset != 0; subset = (subset - 1) & set) {
+      const guint32 other_subset = set ^ subset;
+      const guint subset_cost = min_costs[subset];
+      const guint other_subset_cost = min_costs[other_subset];
+      if (subset_cost != UINT_MAX && other_subset_cost != UINT_MAX) {
+        const guint alt_cost = subset_cost + other_subset_cost;
+        if (alt_cost < cost) {
+          g_slist_free (selected);
+          selected = g_slist_concat (g_slist_copy (selected_proposals[subset]),
+              g_slist_copy (selected_proposals[other_subset]));
+          cost = alt_cost;
+        }
+      }
+    }
+    selected_proposals[set] = selected;
+    min_costs[set] = cost;
+  }
+
+  result = selected_proposals[(1 << src_count) - 1];
+
+  /* Tidy up. */
+  for (set = 0; set != (1 << src_count) - 1; set++)
+    g_slist_free (selected_proposals[set]);
+  g_free (min_costs);
+  g_free (selected_proposals);
+  g_hash_table_destroy (src_id_table);
+
+  return result;
+}
+
 static void
 build_graph (GstAutoConvert2 * autoconvert2)
 {
   GSList *const proposals = generate_proposals (autoconvert2);
+  GSList *const selected_proposals = select_proposals (autoconvert2, proposals);
+  g_slist_free (selected_proposals);
   g_slist_free_full (proposals, (GDestroyNotify) destroy_proposal);
 }
