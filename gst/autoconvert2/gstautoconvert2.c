@@ -95,6 +95,11 @@ struct Proposal
 
   guint step_count;
   GstAutoConvert2TransformationStep *steps;
+
+  GSList **step_children;
+  GstElement **tee_elements;
+  GstPad *chain_sink_pad, *chain_src_pad;
+
   guint cost;
 };
 
@@ -187,6 +192,9 @@ static gboolean set_ghost_pad_target_no_reconfigure (GstGhostPad * pad,
     GstPad * newtarget);
 static void release_ghost_pad (GstGhostPad * pad);
 
+static gboolean forward_sticky_events (GstPad * pad, GstEvent ** event,
+    gpointer user_data);
+
 static gboolean check_instantiated_chain (GstCaps * sink_caps,
     GstPad * chain_sink_pad);
 
@@ -213,7 +221,11 @@ static GHashTable *index_pads (GList * pad_list, guint * pad_count);
 static GSList *select_proposals (GstAutoConvert2 * autoconvert2,
     GSList * proposals);
 
+static void instantiate_proposals (GstAutoConvert2 * autoconvert2,
+    GSList * proposals);
+
 static void build_graph (GstAutoConvert2 * autoconvert2);
+static void clear_graph (GstAutoConvert2 * autoconvert2);
 
 static GQuark in_use_quark = 0;
 static GQuark is_request_pad_quark = 0;
@@ -286,6 +298,16 @@ static void
 gst_auto_convert2_dispose (GObject * object)
 {
   GstAutoConvert2 *const autoconvert2 = GST_AUTO_CONVERT2 (object);
+  GList *it;
+
+  clear_graph (autoconvert2);
+
+  for (it = GST_ELEMENT (autoconvert2)->pads; it; it = it->next) {
+    GstGhostPad *const pad = (GstGhostPad *) it->data;
+    release_ghost_pad (pad);
+    gst_element_remove_pad (GST_ELEMENT (autoconvert2), GST_PAD (pad));
+  }
+
   g_slist_free_full (autoconvert2->priv->factory_index,
       (GDestroyNotify) destroy_factory_list_entry);
 
@@ -892,6 +914,19 @@ release_ghost_pad (GstGhostPad * pad)
 }
 
 static gboolean
+forward_sticky_events (GstPad * pad, GstEvent ** event, gpointer user_data)
+{
+  if (GST_EVENT_TYPE (*event) != GST_EVENT_EOS) {
+    GstPad *const proxy =
+        GST_PAD (gst_proxy_pad_get_internal (GST_PROXY_PAD (pad)));
+    gst_pad_push_event (proxy, gst_event_ref (*event));
+    gst_object_unref (GST_PAD (proxy));
+  }
+
+  return TRUE;
+}
+
+static gboolean
 check_instantiated_chain (GstCaps * sink_caps, GstPad * chain_sink_pad)
 {
   GstCaps *const chain_sink_caps = gst_pad_query_caps (chain_sink_pad, NULL);
@@ -1234,10 +1269,209 @@ select_proposals (GstAutoConvert2 * autoconvert2, GSList * proposals)
 }
 
 static void
+instantiate_proposals (GstAutoConvert2 * autoconvert2, GSList * proposals)
+{
+  GHashTable *const sink_pad_tees = g_hash_table_new (NULL, NULL);
+  GList *i;
+  GSList *it;
+
+  /* Index the children of each sink pad and the children of each proposal. */
+  for (it = proposals; it; it = it->next) {
+    struct Proposal *const p = (struct Proposal *) it->data;
+    struct Proposal *const parent = p->parent.proposal;
+
+    if (parent) {
+      GSList **step_children = parent->step_children;
+      const guint step = p->parent.parent_step;
+
+      if (!step_children) {
+        step_children = g_malloc0 (sizeof (GSList *) * parent->step_count);
+        parent->step_children = step_children;
+        parent->tee_elements = g_malloc0 (sizeof (GstElement *) *
+            parent->step_count);
+      }
+
+      step_children[step] = g_slist_prepend (step_children[step], p);
+    } else {
+      GstPad *const pad = p->parent.pad;
+      GstElement *tee = NULL;
+
+      /* Create a table of in-use sink pads and associated tee elements. A tee
+       * will created if more than one element connects to the sink pad, or if
+       * the element connects directly through to one or more source pads. */
+      if ((g_hash_table_lookup_extended (sink_pad_tees, pad, NULL,
+                  (gpointer *) & tee) || p->step_count == 0) && !tee) {
+        GstPad *target_pad;
+
+        tee = gst_element_factory_make ("tee", NULL);
+        gst_bin_add (GST_BIN (autoconvert2), tee);
+        gst_element_sync_state_with_parent (tee);
+        target_pad = get_element_pad (tee, "sink");
+        set_ghost_pad_target_no_reconfigure (GST_GHOST_PAD (pad), target_pad);
+        gst_object_unref (target_pad);
+      }
+
+      g_hash_table_replace (sink_pad_tees, pad, tee);
+    }
+  }
+
+  /* Create the chains with tee elements for the attachment points. */
+  for (it = proposals; it; it = it->next) {
+    struct Proposal *const p = (struct Proposal *) it->data;
+    GstPad *src_pad = NULL;
+    guint j;
+
+    for (j = 0; j != p->step_count; j++) {
+      const GstAutoConvert2TransformationStep *const s = p->steps + j;
+      GstElement *const element = gst_element_factory_create (s->factory, NULL);
+      GstPad *const sink_pad = get_element_pad (element,
+          s->sink_pad_template->name_template);
+
+      gst_bin_add (GST_BIN (autoconvert2), element);
+      gst_element_sync_state_with_parent (element);
+
+      if (src_pad) {
+        gst_pad_link_full (src_pad, sink_pad, GST_PAD_LINK_CHECK_NOTHING |
+            GST_PAD_LINK_CHECK_NO_RECONFIGURE);
+        gst_object_unref (src_pad);
+        gst_object_unref (sink_pad);
+      } else
+        p->chain_sink_pad = sink_pad;
+
+      src_pad = get_element_pad (element, s->src_pad_template->name_template);
+
+      if (p->step_children && p->step_children[j]) {
+        GstElement *const tee = gst_element_factory_make ("tee", NULL);
+        GstPad *const tee_sink_pad = gst_element_get_static_pad (tee, "sink");
+        gst_bin_add (GST_BIN (autoconvert2), tee);
+        gst_element_sync_state_with_parent (tee);
+        gst_pad_link_full (src_pad, tee_sink_pad, GST_PAD_LINK_CHECK_NOTHING |
+            GST_PAD_LINK_CHECK_NO_RECONFIGURE);
+        gst_object_unref (tee_sink_pad);
+        p->tee_elements[j] = tee;
+        gst_object_unref (src_pad);
+        src_pad = get_element_pad (tee, "src_%u");
+      }
+    }
+
+    p->chain_src_pad = src_pad;
+  }
+
+  /* Link the chain to the input and output pads. */
+  for (it = proposals; it; it = it->next) {
+    const struct Proposal *const p = (struct Proposal *) it->data;
+    GstElement *const src_tee = p->parent.proposal ?
+        p->parent.proposal->tee_elements[p->parent.parent_step] :
+        g_hash_table_lookup (sink_pad_tees, GST_PAD (p->parent.pad));
+    GstPad *const src_tee_pad = src_tee ?
+        get_element_pad (src_tee, "src_%u") : NULL;
+
+    if (src_tee_pad && p->chain_sink_pad) {
+      /* Link a source tee to the input of the chain, and the output of the
+       * chain to the source ghost pad. */
+      g_warn_if_fail (p->chain_sink_pad && p->chain_src_pad);
+      gst_pad_link_full (src_tee_pad, p->chain_sink_pad,
+          GST_PAD_LINK_CHECK_NOTHING | GST_PAD_LINK_CHECK_NO_RECONFIGURE);
+      set_ghost_pad_target_no_reconfigure (GST_GHOST_PAD (p->src_pad),
+          p->chain_src_pad);
+      gst_object_unref (src_tee_pad);
+    } else if (!p->parent.proposal && p->chain_sink_pad) {
+      /* Link a sink ghost pad to the input of the chain, and the output of the
+       * chain to the source ghost pad. */
+      set_ghost_pad_target_no_reconfigure (GST_GHOST_PAD (p->parent.pad),
+          p->chain_sink_pad);
+      set_ghost_pad_target_no_reconfigure (GST_GHOST_PAD (p->src_pad),
+          p->chain_src_pad);
+    } else if (src_tee_pad && !p->chain_sink_pad) {
+      /* Link a source tee directly through to the source ghost pad. */
+      g_warn_if_fail (!p->chain_sink_pad && !p->chain_src_pad);
+      set_ghost_pad_target_no_reconfigure (GST_GHOST_PAD (p->src_pad),
+          src_tee_pad);
+      gst_object_unref (src_tee_pad);
+    } else {
+      /* All other links are handled elsewhere. */
+      g_warn_if_reached ();
+    }
+  }
+
+  /* Attach fakesinks to all the unused sink pads. */
+  for (i = GST_ELEMENT (autoconvert2)->sinkpads; i; i = i->next) {
+    GstPad *const pad = (GstPad *) i->data;
+    if (!g_hash_table_contains (sink_pad_tees, pad)) {
+      GstElement *const fakesink = gst_element_factory_make ("fakesink", NULL);
+      gst_bin_add (GST_BIN (autoconvert2), fakesink);
+      gst_element_sync_state_with_parent (fakesink);
+      set_ghost_pad_target_no_reconfigure (GST_GHOST_PAD (pad),
+          get_element_pad (fakesink, "sink"));
+    }
+  }
+
+  /* Forward the sticky events */
+  for (i = GST_ELEMENT (autoconvert2)->sinkpads; i; i = i->next)
+    gst_pad_sticky_events_foreach (i->data, forward_sticky_events, NULL);
+
+  /* Tidy up the temporary construction data. */
+  for (it = proposals; it; it = it->next) {
+    struct Proposal *const p = (struct Proposal *) it->data;
+    g_free (p->step_children);
+    p->step_children = NULL;
+    g_free (p->tee_elements);
+    p->tee_elements = NULL;
+
+    if (p->chain_src_pad) {
+      gst_object_unref (p->chain_src_pad);
+      p->chain_src_pad = NULL;
+    }
+
+    if (p->chain_src_pad) {
+      gst_object_unref (p->chain_sink_pad);
+      p->chain_sink_pad = NULL;
+    }
+  }
+
+  g_hash_table_destroy (sink_pad_tees);
+}
+
+static void
 build_graph (GstAutoConvert2 * autoconvert2)
 {
   GSList *const proposals = generate_proposals (autoconvert2);
   GSList *const selected_proposals = select_proposals (autoconvert2, proposals);
+  instantiate_proposals (autoconvert2, selected_proposals);
   g_slist_free (selected_proposals);
   g_slist_free_full (proposals, (GDestroyNotify) destroy_proposal);
+}
+
+static void
+clear_graph (GstAutoConvert2 * autoconvert2)
+{
+  GstBin *const bin = GST_BIN (autoconvert2);
+  GList *i, *j;
+
+  /* Set the elements into the NULL state. */
+  for (i = bin->children; i; i = i->next)
+    gst_element_set_state ((GstElement *) i->data, GST_STATE_NULL);
+
+  /* Reset the targets of all ghost pads. */
+  for (i = GST_ELEMENT (bin)->pads; i; i = i->next)
+    release_ghost_pad (i->data);
+
+  /* Unlink the pads. */
+  for (i = bin->children; i; i = i->next) {
+    GstElement *const element = (GstElement *) i->data;
+    for (j = element->srcpads; j; j = j->next) {
+      GstPad *const pad = (GstPad *) j->data;
+      GstPad *const peer = gst_pad_get_peer (pad);
+      if (peer) {
+        gst_pad_unlink (pad, peer);
+        release_element_pad (pad);
+        release_element_pad (peer);
+        gst_object_unref (peer);
+      }
+    }
+  }
+
+  /* Remove the elements from the bin. */
+  while (bin->children)
+    gst_bin_remove (bin, GST_ELEMENT_CAST (bin->children->data));
 }
