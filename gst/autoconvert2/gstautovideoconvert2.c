@@ -38,19 +38,32 @@
 GST_DEBUG_CATEGORY (autovideoconvert2_debug);
 #define GST_CAT_DEFAULT (autovideoconvert2_debug)
 
+struct Size
+{
+  gint width, height;
+};
+
 struct _GstAutoVideoConvert2Priv
 {
+  struct Size min_sink_image_size, max_sink_image_size;
 };
 
 static void gst_auto_video_convert2_finalize (GObject * object);
 
 static GList *gst_auto_video_convert2_get_factories (GstAutoConvert2 *
     autoconvert2);
+static gboolean
+gst_auto_video_convert2_validate_transform_route (GstAutoConvert2 *
+    autoconvert2, const GstAutoConvert2TransformRoute * route);
+static void gst_auto_video_convert2_begin_building_graph (GstAutoConvert2 *
+    autoconvert2);
 
 static gboolean element_filter (GstPluginFeature * feature,
     GstAutoVideoConvert2 * autovideoconvert2);
 static GList *create_factory_list (GstAutoVideoConvert2 * autovideoconvert2);
 static void update_factory_list (GstAutoVideoConvert2 * autovideoconvert2);
+
+static gboolean get_caps_image_size (GstCaps * caps, struct Size *size);
 
 static GMutex factories_mutex;
 static guint32 factories_cookie = 0;    /* Cookie from last time when factories was updated */
@@ -71,6 +84,10 @@ gst_auto_video_convert2_class_init (GstAutoVideoConvert2Class * klass)
 
   gstautoconvert2_class->get_factories =
       GST_DEBUG_FUNCPTR (gst_auto_video_convert2_get_factories);
+  gstautoconvert2_class->validate_transform_route =
+      GST_DEBUG_FUNCPTR (gst_auto_video_convert2_validate_transform_route);
+  gstautoconvert2_class->begin_building_graph =
+      GST_DEBUG_FUNCPTR (gst_auto_video_convert2_begin_building_graph);
 
   gobject_class->finalize =
       GST_DEBUG_FUNCPTR (gst_auto_video_convert2_finalize);
@@ -96,6 +113,72 @@ gst_auto_video_convert2_get_factories (GstAutoConvert2 * autoconvert2)
       (GstAutoVideoConvert2 *) autoconvert2;
   update_factory_list (autovideoconvert2);
   return factories;
+}
+
+static gboolean
+gst_auto_video_convert2_validate_transform_route (GstAutoConvert2 *
+    autoconvert2, const GstAutoConvert2TransformRoute * route)
+{
+  const GstAutoVideoConvert2 *const autovideoconvert2 =
+      (GstAutoVideoConvert2 *) autoconvert2;
+  const struct Size max_size = autovideoconvert2->priv->max_sink_image_size;
+  struct Size sink_size = { INT_MAX, INT_MAX };
+  struct Size src_size = { INT_MIN, INT_MIN };
+
+  if (get_caps_image_size (route->sink.caps, &sink_size) &&
+      get_caps_image_size (route->src.caps, &src_size)) {
+
+    if (max_size.width != INT_MIN) {
+      /* If we have a larger image, don't enlarge a smaller image. */
+      if (max_size.width > src_size.width &&
+          max_size.height > src_size.height &&
+          (sink_size.width < src_size.width ||
+              sink_size.height < src_size.height))
+        return FALSE;
+
+      /* When enlarging... */
+      if (max_size.width < src_size.width && max_size.height < src_size.height) {
+        /* ...never shrink from a larger image. */
+        if (src_size.width < sink_size.width
+            || src_size.height < sink_size.height)
+          return FALSE;
+
+        /* ...don't use any input smaller than the largest input. */
+        if (max_size.width > sink_size.width
+            || max_size.height > sink_size.height)
+          return FALSE;
+      }
+    }
+  }
+
+  return TRUE;
+}
+
+static void
+gst_auto_video_convert2_begin_building_graph (GstAutoConvert2 * autoconvert2)
+{
+  GstAutoVideoConvert2 *const autovideoconvert2 =
+      (GstAutoVideoConvert2 *) autoconvert2;
+  struct Size min_size = { INT_MAX, INT_MAX };
+  struct Size max_size = { INT_MIN, INT_MIN };
+  struct Size size;
+  GList *i;
+
+  /* Capture the caps of the current set of sink pads. */
+  for (i = ((const GstElement *) autoconvert2)->sinkpads; i; i = i->next) {
+    GstPad *const sink_pad = (GstPad *) i->data;
+    GstCaps *const sink_caps = gst_pad_get_current_caps (sink_pad);
+    if (get_caps_image_size (sink_caps, &size)) {
+      if (size.width < min_size.width && size.height < min_size.height)
+        min_size = size;
+      if (size.width > max_size.width && size.height > max_size.height)
+        max_size = size;
+    }
+    gst_caps_unref (sink_caps);
+  }
+
+  autovideoconvert2->priv->min_sink_image_size = min_size;
+  autovideoconvert2->priv->max_sink_image_size = max_size;
 }
 
 static gboolean
@@ -164,4 +247,22 @@ update_factory_list (GstAutoVideoConvert2 * autovideoconvert2)
   }
 
   g_mutex_unlock (&factories_mutex);
+}
+
+static gboolean
+get_caps_image_size (GstCaps * caps, struct Size *size)
+{
+  guint i;
+
+  for (i = 0; i != gst_caps_get_size (caps); i++) {
+    const GstStructure *const s = gst_caps_get_structure (caps, i);
+    const gchar *const name = gst_structure_get_name (s);
+    if ((strcmp (name, "video/x-raw") == 0 ||
+            strcmp (name, "video/x-bayer") == 0) &&
+        gst_structure_get_int (s, "width", &size->width) &&
+        gst_structure_get_int (s, "height", &size->height))
+      return TRUE;
+  }
+
+  return FALSE;
 }
