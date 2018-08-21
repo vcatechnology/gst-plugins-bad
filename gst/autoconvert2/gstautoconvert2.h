@@ -73,7 +73,7 @@ struct _GstAutoConvert2Class
     guint chain_length);
   guint (*cost_transformation_step) (GstAutoConvert2 * autoconvert2,
     const GstAutoConvert2TransformationStep * transformation_step);
-
+  void (*begin_building_graph) (GstAutoConvert2 * autoconvert2);
 };
 
 GType gst_auto_convert2_get_type (void);

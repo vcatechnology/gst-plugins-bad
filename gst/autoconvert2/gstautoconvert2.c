@@ -129,6 +129,8 @@ static gboolean gst_auto_convert2_validate_transform_route (GstAutoConvert2 *
 static int gst_auto_convert2_validate_chain (GstAutoConvert2 * autoconvert2,
     GstCaps * sink_caps, GstCaps * src_caps, GSList ** chain,
     guint chain_length);
+static void gst_auto_convert2_begin_building_graph (GstAutoConvert2 *
+    autoconvert2);
 
 static GstPad *gst_auto_convert2_request_new_pad (GstElement * element,
     GstPadTemplate * templ, const gchar * name, const GstCaps * caps);
@@ -258,6 +260,8 @@ gst_auto_convert2_class_init (GstAutoConvert2Class * klass)
   klass->validate_transform_route =
       GST_DEBUG_FUNCPTR (gst_auto_convert2_validate_transform_route);
   klass->validate_chain = GST_DEBUG_FUNCPTR (gst_auto_convert2_validate_chain);
+  klass->begin_building_graph =
+      GST_DEBUG_FUNCPTR (gst_auto_convert2_begin_building_graph);
 
   gstelement_class->request_new_pad =
       GST_DEBUG_FUNCPTR (gst_auto_convert2_request_new_pad);
@@ -348,6 +352,11 @@ gst_auto_convert2_validate_chain (GstAutoConvert2 * autoconvert2,
   return -1;
 }
 
+static void
+gst_auto_convert2_begin_building_graph (GstAutoConvert2 * autoconvert2)
+{
+}
+
 static GstPad *
 gst_auto_convert2_request_new_pad (GstElement * element,
     GstPadTemplate * templ, const gchar * name, const GstCaps * caps)
@@ -407,8 +416,11 @@ gst_auto_convert2_sink_event (GstPad * pad, GstObject * parent,
 
       /* If every pad has received a sticky caps event, then we can start
        * building the transformation routes. */
-      if (!it)
+      if (!it) {
+        GST_AUTO_CONVERT2_GET_CLASS (autoconvert2)->begin_building_graph
+            (autoconvert2);
         build_graph (autoconvert2);
+      }
 
       GST_AUTO_CONVERT2_UNLOCK (autoconvert2);
 
