@@ -34,10 +34,15 @@ G_BEGIN_DECLS
 typedef struct _GstAutoVideoConvert2 GstAutoVideoConvert2;
 typedef struct _GstAutoVideoConvert2Class GstAutoVideoConvert2Class;
 
+typedef struct _GstAutoVideoConvert2Priv GstAutoVideoConvert2Priv;
+
 struct _GstAutoVideoConvert2
 {
   /*< private > */
   GstAutoConvert2 base;         /* we extend GstAutoConvert2 */
+
+  /* Internal private data. */
+  GstAutoVideoConvert2Priv *priv;
 };
 
 struct _GstAutoVideoConvert2Class

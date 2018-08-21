@@ -38,6 +38,12 @@
 GST_DEBUG_CATEGORY (autovideoconvert2_debug);
 #define GST_CAT_DEFAULT (autovideoconvert2_debug)
 
+struct _GstAutoVideoConvert2Priv
+{
+};
+
+static void gst_auto_video_convert2_finalize (GObject * object);
+
 static GList *gst_auto_video_convert2_get_factories (GstAutoConvert2 *
     autoconvert2);
 
@@ -56,6 +62,7 @@ G_DEFINE_TYPE (GstAutoVideoConvert2, gst_auto_video_convert2,
 static void
 gst_auto_video_convert2_class_init (GstAutoVideoConvert2Class * klass)
 {
+  GObjectClass *const gobject_class = (GObjectClass *) klass;
   GstAutoConvert2Class *const gstautoconvert2_class =
       (GstAutoConvert2Class *) klass;
 
@@ -64,11 +71,22 @@ gst_auto_video_convert2_class_init (GstAutoVideoConvert2Class * klass)
 
   gstautoconvert2_class->get_factories =
       GST_DEBUG_FUNCPTR (gst_auto_video_convert2_get_factories);
+
+  gobject_class->finalize =
+      GST_DEBUG_FUNCPTR (gst_auto_video_convert2_finalize);
 }
 
 static void
 gst_auto_video_convert2_init (GstAutoVideoConvert2 * autovideoconvert2)
 {
+  autovideoconvert2->priv = g_malloc0 (sizeof (GstAutoVideoConvert2Priv));
+}
+
+static void
+gst_auto_video_convert2_finalize (GObject * object)
+{
+  GstAutoVideoConvert2 *autovideoconvert2 = GST_AUTO_VIDEO_CONVERT2 (object);
+  g_free (autovideoconvert2->priv);
 }
 
 static GList *
