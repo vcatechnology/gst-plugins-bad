@@ -32,6 +32,62 @@
  *
  * If the caps change, the element will replace the network with another that
  * will convert to the new caps.
+ *
+ * # Method
+ *
+ * When the element is first initialized, it retrieves a list of element
+ * factories from the derrived class for by calling the #get_factories method.
+ * These factories are then scanned to ensure they have one input pad template,
+ * and one output pad template, and the factories and their caps are stored
+ * in a list: #factory_index .
+ *
+ * When querying the caps of the element's source and sink pads it will
+ * advertise the ability to accept the union of the caps on opposite-facing
+ * pads and the pads of all the listed factories.
+ *
+ * When the caps of all the sink pads have been set by the caps event, the
+ * element will calculate the graph of child elements necessary to efficiently
+ * provide the output data required by all the source pads.
+ *
+ * For each source pad, the element considers a "transformation route" beginning
+ * from each of the sink pads. The derrived class can validate whether each
+ * potential route will be allowed with the #validate_transformation_route
+ * method. For example, the sink pads provide 1080p and 480p imagery and 1080p
+ * imagery is required in the source pads, it would be undesirable to allow
+ * transformation routes which source data from the 480p sink pad.
+ *
+ * Then, for each transformation route, the element begins by checking whether
+ * a passthrough is possible. If not it attempts to construct chains of elements
+ * of increasing length, by assembling every possible permutation of elements.
+ * However, many permutations are rejected. For example, elements with
+ * incompatible caps, and chains where two or more copies of the same type of
+ * element are connected in series. The derrived class also has an opportunity
+ * to black-list chains of elements with the #validate_chain method.
+ *
+ * Each chain that passes validation is then instantiated as a sequence of
+ * test elements which are linked together, and then commanded to negotiate
+ * their caps through a caps event sent into the sink pad the chain.
+ *
+ * After the caps have been negotiated by each element in the test chain,
+ * the factory and fixated caps of each element are provided to the derrived
+ * so that it can compute a computation cost of each element. This is an
+ * arbitrary value that is used to determine the relative efficiency of one
+ * method of conversion versus another. The test chain is then deconstructed,
+ * and the element factory sequence, and the total cost are stored in a list as
+ * a #Proposal .
+ *
+ * Once costed proposals have been generated for every allowed direct
+ * transformation route, branched transformation routes are considered. For
+ * each costed proposal, transformation routes are generated that are attached
+ * to every pad along the parent proposal's chain. The branch proposals are
+ * similarly validated, tested and costed.
+ *
+ * The optimal set of proposals is then selected by means of a dynamic
+ * programming algorithm, that searches for the lowest cost set of direct and
+ * branch proposals that can satisfy the source pad caps.
+ *
+ * Once this set has been calculated, the final set of elements is instantiated
+ * and linked.
  */
 
 #include <string.h>
