@@ -55,6 +55,9 @@ static GList *gst_auto_video_convert2_get_factories (GstAutoConvert2 *
 static gboolean
 gst_auto_video_convert2_validate_transform_route (GstAutoConvert2 *
     autoconvert2, const GstAutoConvert2TransformRoute * route);
+static guint gst_auto_video_convert2_cost_transformation_step (GstAutoConvert2 *
+    autoconvert2, const GstAutoConvert2TransformationStep *
+    transformation_step);
 static void gst_auto_video_convert2_begin_building_graph (GstAutoConvert2 *
     autoconvert2);
 
@@ -86,6 +89,8 @@ gst_auto_video_convert2_class_init (GstAutoVideoConvert2Class * klass)
       GST_DEBUG_FUNCPTR (gst_auto_video_convert2_get_factories);
   gstautoconvert2_class->validate_transform_route =
       GST_DEBUG_FUNCPTR (gst_auto_video_convert2_validate_transform_route);
+  gstautoconvert2_class->cost_transformation_step =
+      GST_DEBUG_FUNCPTR (gst_auto_video_convert2_cost_transformation_step);
   gstautoconvert2_class->begin_building_graph =
       GST_DEBUG_FUNCPTR (gst_auto_video_convert2_begin_building_graph);
 
@@ -152,6 +157,21 @@ gst_auto_video_convert2_validate_transform_route (GstAutoConvert2 *
   }
 
   return TRUE;
+}
+
+static guint
+gst_auto_video_convert2_cost_transformation_step (GstAutoConvert2 *
+    autoconvert2, const GstAutoConvert2TransformationStep * transformation_step)
+{
+  struct Size size;
+  guint cost = 0;
+
+  if (get_caps_image_size (transformation_step->src_caps, &size))
+    cost += size.width * size.height;
+  if (get_caps_image_size (transformation_step->sink_caps, &size))
+    cost += size.width * size.height;
+
+  return cost ? cost : 1;
 }
 
 static void
