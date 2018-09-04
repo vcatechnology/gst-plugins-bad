@@ -182,6 +182,7 @@ static void destroy_cache_factory_elements (GSList * entries);
 
 static GstPad *get_element_pad (GstElement * element, const gchar * pad_name);
 static void release_element_pad (GstPad * pad);
+static void release_ghost_pad (GstGhostPad * pad);
 
 static gboolean check_instantiated_chain (GstCaps * sink_caps,
     GstPad * chain_sink_pad);
@@ -846,7 +847,19 @@ release_element_pad (GstPad * pad)
         GINT_TO_POINTER (FALSE));
     gst_object_unref (pad);
   }
+
   gst_object_unref (element);
+}
+
+static void
+release_ghost_pad (GstGhostPad * pad)
+{
+  GstPad *const target_pad = gst_ghost_pad_get_target (GST_GHOST_PAD (pad));
+  if (target_pad) {
+    gst_ghost_pad_set_target (GST_GHOST_PAD (pad), NULL);
+    release_element_pad (target_pad);
+    gst_object_unref (target_pad);
+  }
 }
 
 static gboolean
