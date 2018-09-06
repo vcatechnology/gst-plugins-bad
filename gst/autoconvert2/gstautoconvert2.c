@@ -159,6 +159,13 @@ struct Proposal
   guint cost;
 };
 
+enum BuildState
+{
+  IDLE,
+  DRAINING_GRAPH,
+  REBUILDING_GRAPH
+};
+
 struct _GstAutoConvert2Priv
 {
   /* Lock to prevent caps pipeline structure changes during changes to pads. */
@@ -172,6 +179,12 @@ struct _GstAutoConvert2Priv
 
   /* The union of the caps of all the converter src caps. */
   GstCaps *src_caps;
+
+  volatile enum BuildState state;
+
+  GCond sink_block_cond;
+
+  GHashTable *pending_drain_pads;
 };
 
 static const guint MaxChainLength = 4;
@@ -192,10 +205,14 @@ static GstPad *gst_auto_convert2_request_new_pad (GstElement * element,
     GstPadTemplate * templ, const gchar * name, const GstCaps * caps);
 static void gst_auto_convert2_release_pad (GstElement * element, GstPad * pad);
 
+static GstFlowReturn gst_auto_convert2_chain (GstPad * pad, GstObject * parent,
+    GstBuffer * buffer);
 static gboolean gst_auto_convert2_sink_event (GstPad * pad, GstObject * parent,
     GstEvent * event);
 static gboolean gst_auto_convert2_sink_query (GstPad * pad, GstObject * parent,
     GstQuery * query);
+static gboolean gst_auto_convert2_src_proxy_event (GstPad * pad,
+    GstObject * parent, GstEvent * event);
 static gboolean gst_auto_convert2_src_query (GstPad * pad, GstObject * parent,
     GstQuery * query);
 
@@ -208,6 +225,10 @@ static struct FactoryListEntry *create_factory_index_entry (GstElementFactory *
 static void destroy_factory_list_entry (struct FactoryListEntry *entry);
 static void index_factories (GstAutoConvert2 * autoconvert2);
 
+static void enter_build_state (GstAutoConvert2 * autoconvert2,
+    enum BuildState prev_state, enum BuildState state);
+
+static void check_sink_block (GstAutoConvert2 * autoconvert2);
 static gboolean query_caps (GstAutoConvert2 * autoconvert2, GstQuery * query,
     GstCaps * factory_caps, GList * pads);
 
@@ -284,6 +305,11 @@ static void instantiate_proposals (GstAutoConvert2 * autoconvert2,
 
 static void build_graph (GstAutoConvert2 * autoconvert2);
 static void clear_graph (GstAutoConvert2 * autoconvert2);
+static void begin_rebuilding_graph (GstAutoConvert2 * autoconvert2);
+
+static void graph_drained (GstAutoConvert2 * autoconvert2);
+
+static gboolean needs_reconfigure (GstAutoConvert2 * autoconvert2);
 
 static GQuark in_use_quark = 0;
 static GQuark is_request_pad_quark = 0;
@@ -335,6 +361,8 @@ gst_auto_convert2_init (GstAutoConvert2 * autoconvert2)
 {
   autoconvert2->priv = g_malloc0 (sizeof (GstAutoConvert2Priv));
   g_mutex_init (&autoconvert2->priv->lock);
+  autoconvert2->priv->state = IDLE;
+  g_cond_init (&autoconvert2->priv->sink_block_cond);
 }
 
 static void
@@ -351,6 +379,7 @@ gst_auto_convert2_finalize (GObject * object)
   GstAutoConvert2 *const autoconvert2 = GST_AUTO_CONVERT2 (object);
 
   g_mutex_clear (&autoconvert2->priv->lock);
+  g_cond_clear (&autoconvert2->priv->sink_block_cond);
   g_free (autoconvert2->priv);
 }
 
@@ -373,6 +402,9 @@ gst_auto_convert2_dispose (GObject * object)
 
   gst_caps_unref (autoconvert2->priv->sink_caps);
   gst_caps_unref (autoconvert2->priv->src_caps);
+
+  if (autoconvert2->priv->pending_drain_pads)
+    g_hash_table_destroy (autoconvert2->priv->pending_drain_pads);
 
   G_OBJECT_CLASS (parent_class)->dispose (object);
 }
@@ -423,11 +455,19 @@ gst_auto_convert2_request_new_pad (GstElement * element,
   GST_AUTO_CONVERT2_LOCK (autoconvert2);
 
   if (GST_PAD_TEMPLATE_DIRECTION (templ) == GST_PAD_SINK) {
+    gst_pad_set_chain_function (pad,
+        GST_DEBUG_FUNCPTR (gst_auto_convert2_chain));
     gst_pad_set_event_function (pad,
         GST_DEBUG_FUNCPTR (gst_auto_convert2_sink_event));
     gst_pad_set_query_function (pad,
         GST_DEBUG_FUNCPTR (gst_auto_convert2_sink_query));
   } else {
+    GstProxyPad *const proxy_pad =
+        gst_proxy_pad_get_internal (GST_PROXY_PAD (pad));
+    gst_pad_set_event_function (GST_PAD (proxy_pad),
+        GST_DEBUG_FUNCPTR (gst_auto_convert2_src_proxy_event));
+    gst_object_unref (proxy_pad);
+
     gst_pad_set_query_function (pad,
         GST_DEBUG_FUNCPTR (gst_auto_convert2_src_query));
   }
@@ -453,11 +493,26 @@ gst_auto_convert2_release_pad (GstElement * element, GstPad * pad)
   GST_AUTO_CONVERT2_UNLOCK (autoconvert2);
 }
 
+static GstFlowReturn
+gst_auto_convert2_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
+{
+  GstAutoConvert2 *const autoconvert2 = GST_AUTO_CONVERT2 (parent);
+
+  check_sink_block (autoconvert2);
+
+  if (needs_reconfigure (autoconvert2))
+    begin_rebuilding_graph (autoconvert2);
+
+  return gst_proxy_pad_chain_default (pad, parent, buffer);
+}
+
 static gboolean
 gst_auto_convert2_sink_event (GstPad * pad, GstObject * parent,
     GstEvent * event)
 {
   GstAutoConvert2 *const autoconvert2 = GST_AUTO_CONVERT2 (parent);
+
+  check_sink_block (autoconvert2);
 
   switch (GST_EVENT_TYPE (event)) {
     case GST_EVENT_CAPS:{
@@ -496,6 +551,8 @@ gst_auto_convert2_sink_query (GstPad * pad, GstObject * parent,
 {
   GstAutoConvert2 *const autoconvert2 = GST_AUTO_CONVERT2 (parent);
 
+  check_sink_block (autoconvert2);
+
   switch (GST_QUERY_TYPE (query)) {
     case GST_QUERY_CAPS:
       return query_caps (autoconvert2, query, autoconvert2->priv->sink_caps,
@@ -506,6 +563,38 @@ gst_auto_convert2_sink_query (GstPad * pad, GstObject * parent,
   }
 
   return gst_pad_query_default (pad, parent, query);
+}
+
+static gboolean
+gst_auto_convert2_src_proxy_event (GstPad * pad, GstObject * parent,
+    GstEvent * event)
+{
+  GstPad *const src_pad = GST_PAD (parent);
+  GstAutoConvert2 *const autoconvert2 =
+      (GstAutoConvert2 *) gst_pad_get_parent_element (src_pad);
+  gboolean drop = FALSE;
+
+  if (GST_EVENT_TYPE (event) == GST_EVENT_EOS &&
+      g_atomic_int_get (&autoconvert2->priv->state) == DRAINING_GRAPH) {
+    gboolean last_pad_drained = TRUE;
+
+    GST_AUTO_CONVERT2_LOCK (autoconvert2);
+
+    g_warn_if_fail (autoconvert2->priv->pending_drain_pads);
+    drop = g_hash_table_remove (autoconvert2->priv->pending_drain_pads,
+        src_pad);
+    last_pad_drained =
+        g_hash_table_size (autoconvert2->priv->pending_drain_pads) == 0;
+
+    GST_AUTO_CONVERT2_UNLOCK (autoconvert2);
+
+    if (last_pad_drained)
+      graph_drained (autoconvert2);
+  }
+
+  gst_object_unref (autoconvert2);
+
+  return drop ? TRUE : gst_pad_event_default (pad, parent, event);
 }
 
 static gboolean
@@ -619,6 +708,24 @@ index_factories (GstAutoConvert2 * autoconvert2)
     autoconvert2->priv->src_caps =
         gst_caps_merge (autoconvert2->priv->src_caps, entry->src_caps);
   }
+}
+
+static void
+enter_build_state (GstAutoConvert2 * autoconvert2, enum BuildState prev_state,
+    enum BuildState state)
+{
+  g_warn_if_fail (g_atomic_int_compare_and_exchange (&autoconvert2->priv->state,
+          prev_state, state));
+}
+
+static void
+check_sink_block (GstAutoConvert2 * autoconvert2)
+{
+  GST_AUTO_CONVERT2_LOCK (autoconvert2);
+  while (g_atomic_int_get (&autoconvert2->priv->state) != IDLE)
+    g_cond_wait (&autoconvert2->priv->sink_block_cond,
+        &autoconvert2->priv->lock);
+  GST_AUTO_CONVERT2_UNLOCK (autoconvert2);
 }
 
 static gboolean
@@ -1503,11 +1610,16 @@ instantiate_proposals (GstAutoConvert2 * autoconvert2, GSList * proposals)
 static void
 build_graph (GstAutoConvert2 * autoconvert2)
 {
+  GList *it;
+
   GSList *const proposals = generate_proposals (autoconvert2);
   GSList *const selected_proposals = select_proposals (autoconvert2, proposals);
   instantiate_proposals (autoconvert2, selected_proposals);
   g_slist_free (selected_proposals);
   g_slist_free_full (proposals, (GDestroyNotify) destroy_proposal);
+
+  for (it = GST_ELEMENT (autoconvert2)->srcpads; it; it = it->next)
+    GST_OBJECT_FLAG_UNSET ((GstPad *) it->data, GST_PAD_FLAG_NEED_RECONFIGURE);
 }
 
 static void
@@ -1542,4 +1654,76 @@ clear_graph (GstAutoConvert2 * autoconvert2)
   /* Remove the elements from the bin. */
   while (bin->children)
     gst_bin_remove (bin, GST_ELEMENT_CAST (bin->children->data));
+}
+
+static void
+begin_rebuilding_graph (GstAutoConvert2 * autoconvert2)
+{
+  GList *it, *sink_pads = NULL;
+  gboolean awaiting_drain = FALSE;
+
+  GST_AUTO_CONVERT2_LOCK (autoconvert2);
+
+  enter_build_state (autoconvert2, IDLE, DRAINING_GRAPH);
+  g_warn_if_fail (!autoconvert2->priv->pending_drain_pads);
+
+  sink_pads = g_list_copy_deep (GST_ELEMENT (autoconvert2)->sinkpads,
+      (GCopyFunc) gst_object_ref, NULL);
+
+  /* Make a list of all the sink pads. */
+  autoconvert2->priv->pending_drain_pads = g_hash_table_new (NULL, NULL);
+  for (it = GST_ELEMENT (autoconvert2)->srcpads; it; it = it->next)
+    g_hash_table_add (autoconvert2->priv->pending_drain_pads, it->data);
+
+  GST_AUTO_CONVERT2_UNLOCK (autoconvert2);
+
+  /* Send EOS events through the graph that will indicate when the graph has
+   * drained. */
+  for (it = sink_pads; it; it = it->next) {
+    GstPad *const pad = gst_ghost_pad_get_target ((GstGhostPad *) it->data);
+    if (pad) {
+      gst_pad_send_event (pad, gst_event_new_eos ());
+      gst_object_unref (pad);
+      awaiting_drain = TRUE;
+    }
+  }
+
+  g_list_free_full (sink_pads, gst_object_unref);
+
+  /* If no EOS events were send, the graph is already drained. */
+  if (!awaiting_drain) {
+    g_hash_table_destroy (autoconvert2->priv->pending_drain_pads);
+    autoconvert2->priv->pending_drain_pads = NULL;
+    graph_drained (autoconvert2);
+  }
+}
+
+static void
+graph_drained (GstAutoConvert2 * autoconvert2)
+{
+  GST_AUTO_CONVERT2_LOCK (autoconvert2);
+  enter_build_state (autoconvert2, DRAINING_GRAPH, REBUILDING_GRAPH);
+
+  clear_graph (autoconvert2);
+  build_graph (autoconvert2);
+
+  enter_build_state (autoconvert2, REBUILDING_GRAPH, IDLE);
+  g_cond_signal (&autoconvert2->priv->sink_block_cond);
+
+  if (autoconvert2->priv->pending_drain_pads) {
+    g_hash_table_destroy (autoconvert2->priv->pending_drain_pads);
+    autoconvert2->priv->pending_drain_pads = NULL;
+  }
+
+  GST_AUTO_CONVERT2_UNLOCK (autoconvert2);
+}
+
+static gboolean
+needs_reconfigure (GstAutoConvert2 * autoconvert2)
+{
+  GList *it;
+  gboolean ret = FALSE;
+  for (it = GST_ELEMENT (autoconvert2)->srcpads; it; it = it->next)
+    ret = ret || gst_pad_needs_reconfigure ((GstPad *) it->data);
+  return ret;
 }
