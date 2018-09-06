@@ -67,6 +67,8 @@ static GList *create_factory_list (GstAutoVideoConvert2 * autovideoconvert2);
 static void update_factory_list (GstAutoVideoConvert2 * autovideoconvert2);
 
 static gboolean get_caps_image_size (GstCaps * caps, struct Size *size);
+static gboolean get_caps_frame_rate (GstCaps * caps, gint * numerator,
+    gint * denominator);
 
 static GMutex factories_mutex;
 static guint32 factories_cookie = 0;    /* Cookie from last time when factories was updated */
@@ -164,12 +166,18 @@ gst_auto_video_convert2_cost_transformation_step (GstAutoConvert2 *
     autoconvert2, const GstAutoConvert2TransformationStep * transformation_step)
 {
   struct Size size;
+  gint num, den;
   guint cost = 0;
 
+  if (!get_caps_frame_rate (transformation_step->src_caps, &num, &den))
+    num = 30, den = 1;
   if (get_caps_image_size (transformation_step->src_caps, &size))
-    cost += size.width * size.height;
+    cost += (size.width * size.height * num) / den;
+
+  if (!get_caps_frame_rate (transformation_step->sink_caps, &num, &den))
+    num = 30, den = 1;
   if (get_caps_image_size (transformation_step->sink_caps, &size))
-    cost += size.width * size.height;
+    cost += (size.width * size.height * num) / den;
 
   return cost ? cost : 1;
 }
@@ -281,6 +289,21 @@ get_caps_image_size (GstCaps * caps, struct Size *size)
             strcmp (name, "video/x-bayer") == 0) &&
         gst_structure_get_int (s, "width", &size->width) &&
         gst_structure_get_int (s, "height", &size->height))
+      return TRUE;
+  }
+
+  return FALSE;
+}
+
+static gboolean
+get_caps_frame_rate (GstCaps * caps, gint * numerator, gint * denominator)
+{
+  guint i;
+
+  for (i = 0; i != gst_caps_get_size (caps); i++) {
+    const GstStructure *const s = gst_caps_get_structure (caps, i);
+    if (gst_structure_get_fraction (s, "framerate", numerator, denominator) &&
+        *numerator > 0 && *denominator > 0)
       return TRUE;
   }
 
