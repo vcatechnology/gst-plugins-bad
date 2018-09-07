@@ -244,9 +244,10 @@ element_filter (GstPluginFeature * feature,
 
   klass = gst_element_factory_get_metadata (GST_ELEMENT_FACTORY_CAST (feature),
       GST_ELEMENT_METADATA_KLASS);
-  /* only select color space converter */
-  if (strstr (klass, "Filter") &&
-      strstr (klass, "Converter") && strstr (klass, "Video") &&
+
+  if (strstr (klass, "Video") &&
+      (strstr (klass, "Codec") || strstr (klass, "Converter")) &&
+      !strstr (klass, "Bin") &&
       !is_element_blacklisted (GST_ELEMENT_FACTORY_CAST (feature))) {
     GST_DEBUG_OBJECT (autovideoconvert2,
         "gst_auto_video_convert2_element_filter found %s\n",
