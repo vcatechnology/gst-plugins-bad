@@ -61,6 +61,7 @@ static guint gst_auto_video_convert2_cost_transformation_step (GstAutoConvert2 *
 static void gst_auto_video_convert2_begin_building_graph (GstAutoConvert2 *
     autoconvert2);
 
+static gboolean is_element_blacklisted (GstElementFactory * factory);
 static gboolean element_filter (GstPluginFeature * feature,
     GstAutoVideoConvert2 * autovideoconvert2);
 static GList *create_factory_list (GstAutoVideoConvert2 * autovideoconvert2);
@@ -69,6 +70,10 @@ static void update_factory_list (GstAutoVideoConvert2 * autovideoconvert2);
 static gboolean get_caps_image_size (GstCaps * caps, struct Size *size);
 static gboolean get_caps_frame_rate (GstCaps * caps, gint * numerator,
     gint * denominator);
+
+static const gchar *ElementBlacklist[] = {
+  "alphacolor"
+};
 
 static GMutex factories_mutex;
 static guint32 factories_cookie = 0;    /* Cookie from last time when factories was updated */
@@ -210,6 +215,24 @@ gst_auto_video_convert2_begin_building_graph (GstAutoConvert2 * autoconvert2)
 }
 
 static gboolean
+is_element_blacklisted (GstElementFactory * factory)
+{
+  gchar *const factory_name = gst_object_get_name (GST_OBJECT (factory));
+  guint i;
+
+  for (i = 0; i != sizeof (ElementBlacklist) / sizeof (ElementBlacklist[0]);
+      i++) {
+    if (strcmp (factory_name, ElementBlacklist[i]) == 0) {
+      g_free (factory_name);
+      return TRUE;
+    }
+  }
+
+  g_free (factory_name);
+  return FALSE;
+}
+
+static gboolean
 element_filter (GstPluginFeature * feature,
     GstAutoVideoConvert2 * autovideoconvert2)
 {
@@ -223,7 +246,8 @@ element_filter (GstPluginFeature * feature,
       GST_ELEMENT_METADATA_KLASS);
   /* only select color space converter */
   if (strstr (klass, "Filter") &&
-      strstr (klass, "Converter") && strstr (klass, "Video")) {
+      strstr (klass, "Converter") && strstr (klass, "Video") &&
+      !is_element_blacklisted (GST_ELEMENT_FACTORY_CAST (feature))) {
     GST_DEBUG_OBJECT (autovideoconvert2,
         "gst_auto_video_convert2_element_filter found %s\n",
         gst_plugin_feature_get_name (GST_PLUGIN_FEATURE_CAST (feature)));
