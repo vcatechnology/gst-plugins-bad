@@ -118,11 +118,27 @@ static GstStaticPadTemplate srctemplate = GST_STATIC_PAD_TEMPLATE ("src_%u",
     GST_PAD_REQUEST,
     GST_STATIC_CAPS_ANY);
 
+enum Klasses
+{
+  CONVERTER = 1 << 0,
+  DECODER = 1 << 1,
+  ENCODER = 1 << 2,
+  PARSER = 1 << 3
+};
+
+static const gchar *KlassStrings[] = {
+  "Converter",
+  "Decoder",
+  "Encoder",
+  "Parser"
+};
+
 struct FactoryListEntry
 {
   GstStaticPadTemplate *sink_pad_template, *src_pad_template;
   GstCaps *sink_caps, *src_caps;
   GstElementFactory *factory;
+  guint klass_mask;
 };
 
 struct ChainGenerator
@@ -236,6 +252,9 @@ static int validate_chain_caps (GstAutoConvert2 * autoconvert2,
     GstCaps * chain_sink_caps, GstCaps * chain_src_caps, GSList ** chain,
     guint chain_length);
 static int validate_non_consecutive_elements (GstAutoConvert2 * autoconvert2,
+    GstCaps * sink_caps, GstCaps * src_caps, GSList ** chain,
+    guint chain_length);
+static int validate_element_order (GstAutoConvert2 * autoconvert2,
     GstCaps * sink_caps, GstCaps * src_caps, GSList ** chain,
     guint chain_length);
 
@@ -425,7 +444,8 @@ gst_auto_convert2_validate_chain (GstAutoConvert2 * autoconvert2,
       guint);
   const Validator validators[] = {
     validate_chain_caps,
-    validate_non_consecutive_elements
+    validate_non_consecutive_elements,
+    validate_element_order
   };
 
   guint i;
@@ -708,6 +728,19 @@ index_factories (GstAutoConvert2 * autoconvert2)
     autoconvert2->priv->src_caps =
         gst_caps_merge (autoconvert2->priv->src_caps, entry->src_caps);
   }
+
+  /* Index the klasses. */
+  for (i = autoconvert2->priv->factory_index; i; i = i->next) {
+    guint j;
+    struct FactoryListEntry *const entry = (struct FactoryListEntry *) i->data;
+    const gchar *const klass = gst_element_factory_get_metadata (entry->factory,
+        GST_ELEMENT_METADATA_KLASS);
+
+    entry->klass_mask = 0;
+    for (j = 0; j != sizeof (KlassStrings) / sizeof (KlassStrings[0]); j++)
+      if (strstr (klass, KlassStrings[j]))
+        entry->klass_mask |= 1 << j;
+  }
 }
 
 static void
@@ -813,10 +846,38 @@ validate_non_consecutive_elements (GstAutoConvert2 * autoconvert2,
     GstCaps * sink_caps, GstCaps * src_caps, GSList ** chain,
     guint chain_length)
 {
-  int depth = 0;
+  int depth;
   for (depth = chain_length - 2; depth >= 0; depth--)
     if (chain[depth]->data == chain[depth + 1]->data)
       break;
+  return depth;
+}
+
+static int
+validate_element_order (GstAutoConvert2 * autoconvert2,
+    GstCaps * sink_caps, GstCaps * src_caps, GSList ** chain,
+    guint chain_length)
+{
+  const guint stage_klasses[] = { PARSER, DECODER, CONVERTER, ENCODER };
+  const guint stage_count = sizeof (stage_klasses) / sizeof (stage_klasses[0]);
+
+  int prev_stage = stage_count - 1;
+  int depth, stage;
+
+  for (depth = chain_length - 1; depth >= 0; depth--) {
+    const struct FactoryListEntry *const entry =
+        (const struct FactoryListEntry *) chain[depth]->data;
+
+    for (stage = 0; stage != stage_count; stage++)
+      if (entry->klass_mask & stage_klasses[stage])
+        break;
+
+    if (stage > prev_stage)
+      break;
+
+    prev_stage = stage;
+  }
+
   return depth;
 }
 
