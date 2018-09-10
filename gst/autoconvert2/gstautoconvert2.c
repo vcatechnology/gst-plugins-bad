@@ -141,6 +141,11 @@ struct FactoryListEntry
   guint klass_mask;
 };
 
+struct CapsPair
+{
+  GstCaps *first, *second;
+};
+
 struct ChainGenerator
 {
   GstCaps *sink_caps, *src_caps;
@@ -196,6 +201,8 @@ struct _GstAutoConvert2Priv
   /* The union of the caps of all the converter src caps. */
   GstCaps *src_caps;
 
+  GHashTable *caps_intersection_table;
+
   volatile enum BuildState state;
 
   GCond sink_block_cond;
@@ -247,6 +254,10 @@ static void enter_build_state (GstAutoConvert2 * autoconvert2,
 static void check_sink_block (GstAutoConvert2 * autoconvert2);
 static gboolean query_caps (GstAutoConvert2 * autoconvert2, GstQuery * query,
     GstCaps * factory_caps, GList * pads);
+
+static guint hash_caps_pairs (struct CapsPair *pair);
+static gboolean caps_pairs_equal (struct CapsPair *a, struct CapsPair *b);
+static void destroy_caps_pair (struct CapsPair *pair);
 
 static int validate_chain_caps (GstAutoConvert2 * autoconvert2,
     GstCaps * chain_sink_caps, GstCaps * chain_src_caps, GSList ** chain,
@@ -381,6 +392,9 @@ gst_auto_convert2_init (GstAutoConvert2 * autoconvert2)
   autoconvert2->priv = g_malloc0 (sizeof (GstAutoConvert2Priv));
   g_mutex_init (&autoconvert2->priv->lock);
   autoconvert2->priv->state = IDLE;
+  autoconvert2->priv->caps_intersection_table =
+      g_hash_table_new_full ((GHashFunc) hash_caps_pairs,
+      (GEqualFunc) caps_pairs_equal, (GDestroyNotify) destroy_caps_pair, NULL);
   g_cond_init (&autoconvert2->priv->sink_block_cond);
 }
 
@@ -399,6 +413,7 @@ gst_auto_convert2_finalize (GObject * object)
 
   g_mutex_clear (&autoconvert2->priv->lock);
   g_cond_clear (&autoconvert2->priv->sink_block_cond);
+  g_hash_table_destroy (autoconvert2->priv->caps_intersection_table);
   g_free (autoconvert2->priv);
 }
 
@@ -820,6 +835,26 @@ destroy_chain_generator (struct ChainGenerator *generator)
   g_free (generator->iterators);
 }
 
+static guint
+hash_caps_pairs (struct CapsPair *pair)
+{
+  return GPOINTER_TO_INT (pair->first) + (GPOINTER_TO_INT (pair->second) >> 2);
+}
+
+static gboolean
+caps_pairs_equal (struct CapsPair *a, struct CapsPair *b)
+{
+  return (a == b) || (a && b && a->first == b->first && a->second == b->second);
+}
+
+static void
+destroy_caps_pair (struct CapsPair *pair)
+{
+  gst_caps_unref (pair->first);
+  gst_caps_unref (pair->second);
+  g_free (pair);
+}
+
 static int
 validate_chain_caps (GstAutoConvert2 * autoconvert2, GstCaps * chain_sink_caps,
     GstCaps * chain_src_caps, GSList ** chain, guint chain_length)
@@ -829,12 +864,30 @@ validate_chain_caps (GstAutoConvert2 * autoconvert2, GstCaps * chain_sink_caps,
   /* Check if this chain's caps can connect, heading in the upstream
    * direction. */
   do {
-    const GstCaps *const src_caps = (depth == 0) ? chain_sink_caps :
+    GstCaps *const src_caps = (depth == 0) ? chain_sink_caps :
         ((struct FactoryListEntry *) chain[depth - 1]->data)->src_caps;
-    const GstCaps *const sink_caps = (depth == chain_length) ? chain_src_caps :
-        ((struct FactoryListEntry *) chain[depth]->data)->sink_caps;
+    GstCaps *const sink_caps =
+        (depth == chain_length) ? chain_src_caps : ((struct FactoryListEntry *)
+        chain[depth]->data)->sink_caps;
+    gboolean intersects;
+    struct CapsPair lookup_key = { src_caps, sink_caps };
 
-    if (!gst_caps_can_intersect (src_caps, sink_caps))
+    if (!g_hash_table_lookup_extended (autoconvert2->
+            priv->caps_intersection_table, &lookup_key, NULL,
+            (gpointer *) & intersects)) {
+      struct CapsPair *const key = g_malloc (sizeof (struct CapsPair));
+
+      key->first = src_caps;
+      gst_caps_ref (src_caps);
+      key->second = sink_caps;
+      gst_caps_ref (sink_caps);
+
+      intersects = gst_caps_can_intersect (src_caps, sink_caps);
+      g_hash_table_insert (autoconvert2->priv->caps_intersection_table,
+          key, GINT_TO_POINTER (intersects));
+    }
+
+    if (!intersects)
       break;
   } while (--depth >= 0);
 
