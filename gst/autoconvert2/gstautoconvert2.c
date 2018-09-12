@@ -182,6 +182,9 @@ static void destroy_cache_factory_elements (GSList * entries);
 
 static GstPad *get_element_pad (GstElement * element, const gchar * pad_name);
 static void release_element_pad (GstPad * pad);
+
+static gboolean set_ghost_pad_target_no_reconfigure (GstGhostPad * pad,
+    GstPad * newtarget);
 static void release_ghost_pad (GstGhostPad * pad);
 
 static gboolean check_instantiated_chain (GstCaps * sink_caps,
@@ -849,6 +852,32 @@ release_element_pad (GstPad * pad)
   }
 
   gst_object_unref (element);
+}
+
+static gboolean
+set_ghost_pad_target_no_reconfigure (GstGhostPad * pad, GstPad * newtarget)
+{
+  GstPadLinkReturn lret;
+  GstPad *const internal =
+      GST_PAD (gst_proxy_pad_get_internal (GST_PROXY_PAD (pad)));
+
+  g_warn_if_fail (gst_ghost_pad_get_target (GST_GHOST_PAD (pad)) == NULL);
+  if (GST_PAD_IS_SRC (internal))
+    lret = gst_pad_link_full (internal, newtarget, GST_PAD_LINK_CHECK_NOTHING |
+        GST_PAD_LINK_CHECK_NO_RECONFIGURE);
+  else
+    lret = gst_pad_link_full (newtarget, internal, GST_PAD_LINK_CHECK_NOTHING |
+        GST_PAD_LINK_CHECK_NO_RECONFIGURE);
+
+  gst_object_unref (internal);
+
+  if (lret != GST_PAD_LINK_OK) {
+    GST_WARNING_OBJECT (pad, "could not link internal and target, reason:%s",
+        gst_pad_link_get_name (lret));
+    return FALSE;
+  }
+
+  return TRUE;
 }
 
 static void
