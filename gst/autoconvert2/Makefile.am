@@ -1,6 +1,6 @@
 plugin_LTLIBRARIES = libgstautoconvert2.la
 
-libgstautoconvert2_la_SOURCES = gstautoconvert2.c plugin.c
+libgstautoconvert2_la_SOURCES = gstautoconvert2.c gstautovideoconvert2.c plugin.c
 
 libgstautoconvert2_la_CFLAGS = $(GST_CFLAGS)
 libgstautoconvert2_la_LIBADD = $(GST_LIBS)

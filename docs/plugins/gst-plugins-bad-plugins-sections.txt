@@ -320,6 +320,22 @@ gst_auto_video_convert_get_type
 </SECTION>
 
 <SECTION>
+<FILE>element-autovideoconvert2</FILE>
+<TITLE>autovideoconvert2</TITLE>
+GstAutoVideoConvert2
+<SUBSECTION Standard>
+GstAutoVideoConvertClass
+GST_AUTO_VIDEO_CONVERT2
+GST_AUTO_VIDEO_CONVERT2_CAST
+GST_IS_AUTO_VIDEO_CONVERT2
+GST_AUTO_VIDEO_CONVERT2_CLASS
+GST_IS_AUTO_VIDEO_CONVERT2_CLASS
+GST_TYPE_AUTO_VIDEO_CONVERT2
+<SUBSECTION Private>
+gst_auto_video_convert2_get_type
+</SECTION>
+
+<SECTION>
 <FILE>element-avdtpsink</FILE>
 <TITLE>avdtpsink</TITLE>
 GstAvdtpSink

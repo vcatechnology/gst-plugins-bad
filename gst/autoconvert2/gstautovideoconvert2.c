@@ -2,7 +2,7 @@
  *
  *  Copyright 2018 VCA Technology Ltd.
  *   @author: Joel Holdsworth <joel.holdsworth@vcatechnology.com>
- *
+ *  
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
  * License as published by the Free Software Foundation; either
@@ -18,6 +18,14 @@
  * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
  * Boston, MA 02110-1301, USA.
  */
+/**
+ * SECTION:element-autoconvert2
+ * @title: autoconvert2
+ * @short_description: Constructs a graph of elements based on the caps.
+ *
+ * The #autovideoconvert2 is a specialized version of the #autoconvert2 element
+ * that is designed for converting video imagery.
+ */
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
@@ -25,15 +33,20 @@
 
 #include "gstautovideoconvert2.h"
 
-static gboolean
-plugin_init (GstPlugin * plugin)
+GST_DEBUG_CATEGORY (autovideoconvert2_debug);
+#define GST_CAT_DEFAULT (autovideoconvert2_debug)
+
+G_DEFINE_TYPE (GstAutoVideoConvert2, gst_auto_video_convert2,
+    GST_TYPE_AUTO_CONVERT2);
+
+static void
+gst_auto_video_convert2_class_init (GstAutoVideoConvert2Class * klass)
 {
-  return gst_element_register (plugin, "autovideoconvert2",
-      GST_RANK_NONE, GST_TYPE_AUTO_VIDEO_CONVERT2);
+  GST_DEBUG_CATEGORY_INIT (autovideoconvert2_debug, "autovideoconvert2", 0,
+      "autovideoconvert2 element");
 }
 
-GST_PLUGIN_DEFINE (GST_VERSION_MAJOR,
-    GST_VERSION_MINOR,
-    autoconvert2,
-    "Selects convertor elements based on caps",
-    plugin_init, VERSION, GST_LICENSE, GST_PACKAGE_NAME, GST_PACKAGE_ORIGIN)
+static void
+gst_auto_video_convert2_init (GstAutoVideoConvert2 * autovideoconvert2)
+{
+}

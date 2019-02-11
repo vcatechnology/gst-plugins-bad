@@ -113,6 +113,7 @@ EXTRA_HFILES = \
 	$(top_srcdir)/gst/aiff/aiffmux.h \
 	$(top_srcdir)/gst/autoconvert/gstautoconvert.h \
 	$(top_srcdir)/gst/autoconvert2/gstautoconvert2.h \
+	$(top_srcdir)/gst/autoconvert2/gstautovideoconvert2.h \
 	$(top_srcdir)/gst/audiovisualizers/gstspacescope.h \
 	$(top_srcdir)/gst/audiovisualizers/gstspectrascope.h \
 	$(top_srcdir)/gst/audiovisualizers/gstsynaescope.h \
